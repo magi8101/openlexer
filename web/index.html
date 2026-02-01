@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenLexer - Lexer & Parser Generator</title>
+    <link data-trunk rel="rust" data-bin="openlexer-gui" data-cargo-features="gui" href="../Cargo.toml" />
     <style>
         * {
             margin: 0;
@@ -80,24 +81,5 @@
     </div>
     
     <canvas id="openlexer_canvas"></canvas>
-    
-    <script type="module">
-        import init from './openlexer.js';
-        
-        async function run() {
-            try {
-                await init();
-                document.getElementById('loading').classList.add('hidden');
-            } catch (error) {
-                document.getElementById('loading').innerHTML = `
-                    <h1>Error</h1>
-                    <p style="color: #ff6b6b;">Failed to load OpenLexer</p>
-                    <p style="margin-top: 1rem; font-size: 0.9rem;">${error}</p>
-                `;
-            }
-        }
-        
-        run();
-    </script>
 </body>
 </html>

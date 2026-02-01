@@ -9,6 +9,8 @@ use openlexer_lib::{lexgen, parsegen};
 // Web-specific imports for download functionality
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 #[cfg(target_arch = "wasm32")]
 mod web_utils {
@@ -702,21 +704,36 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
-pub fn start() -> Result<(), JsValue> {
+pub async fn start() -> Result<(), JsValue> {
     // Redirect panics to console.error
     console_error_panic_hook::set_once();
     
     let web_options = eframe::WebOptions::default();
     
-    wasm_bindgen_futures::spawn_local(async {
-        let _ = eframe::WebRunner::new()
-            .start(
-                "openlexer_canvas",
-                web_options,
-                Box::new(|cc| Ok(Box::new(OpenLexerApp::new(cc)))),
-            )
-            .await;
-    });
+    // Get the canvas element
+    let document = web_sys::window()
+        .expect("No window")
+        .document()
+        .expect("No document");
+    
+    let canvas = document
+        .get_element_by_id("openlexer_canvas")
+        .expect("No canvas element with id 'openlexer_canvas'")
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .expect("Element is not a canvas");
+    
+    eframe::WebRunner::new()
+        .start(
+            canvas,
+            web_options,
+            Box::new(|cc| Ok(Box::new(OpenLexerApp::new(cc)))),
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
     
     Ok(())
 }
+
+// Empty main for WASM - the actual entry point is the wasm_bindgen start function above
+#[cfg(target_arch = "wasm32")]
+fn main() {}
