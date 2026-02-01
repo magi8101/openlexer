@@ -374,6 +374,7 @@ impl OpenLexerApp {
 }
 
 /// Simple timestamp function (no external deps)
+#[cfg(not(target_arch = "wasm32"))]
 fn chrono_lite_time() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let duration = SystemTime::now()
@@ -383,6 +384,15 @@ fn chrono_lite_time() -> String {
     let hours = (secs / 3600) % 24;
     let mins = (secs / 60) % 60;
     let seconds = secs % 60;
+    format!("{:02}:{:02}:{:02}", hours, mins, seconds)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn chrono_lite_time() -> String {
+    let date = js_sys::Date::new_0();
+    let hours = date.get_hours();
+    let mins = date.get_minutes();
+    let seconds = date.get_seconds();
     format!("{:02}:{:02}:{:02}", hours, mins, seconds)
 }
 
@@ -721,6 +731,11 @@ pub async fn start() -> Result<(), JsValue> {
         .expect("No canvas element with id 'openlexer_canvas'")
         .dyn_into::<web_sys::HtmlCanvasElement>()
         .expect("Element is not a canvas");
+    
+    // Hide loading screen
+    if let Some(loading) = document.get_element_by_id("loading") {
+        let _ = loading.set_attribute("style", "display: none !important;");
+    }
     
     eframe::WebRunner::new()
         .start(
