@@ -7,50 +7,36 @@ on:
     branches: [main, master]
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
+  contents: write
 
 jobs:
-  # Build WASM for web
-  build-wasm:
+  build-github-pages:
     runs-on: ubuntu-latest
     
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup toolchain for wasm
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup set profile minimal
+          rustup target add wasm32-unknown-unknown
+      
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Download and install Trunk binary
+        run: wget -qO- https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
+      
+      - name: Build
+        run: ./trunk build --release --public-url $public_url web/index.html
+        env:
+          public_url: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+      
+      - name: Deploy
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: JamesIves/github-pages-deploy-action@v4
         with:
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        run: cargo install trunk
-      
-      - name: Build WASM
-        run: trunk build --release=true --public-url /openlexer/ web/index.html
-      
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-  # Deploy to GitHub Pages
-  deploy:
-    needs: build-wasm
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-    
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
-
+          folder: dist
+          single-commit: true
