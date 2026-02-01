@@ -1,0 +1,117 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  # Build CLI for multiple platforms
+  build-cli:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }}
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openlexer-${{ matrix.name }}
+          path: |
+            target/${{ matrix.target }}/release/openlexer
+            target/${{ matrix.target }}/release/openlexer.exe
+
+  # Build WASM for web
+  build-wasm:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
+      
+      - name: Install trunk
+        run: cargo install trunk
+      
+      - name: Build WASM
+        run: |
+          trunk build --release --features gui web/index.html
+      
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  # Deploy to GitHub Pages
+  deploy:
+    needs: build-wasm
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # Run tests
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+      
+      - name: Run tests
+        run: cargo test --all-features
+      
+      - name: Check formatting
+        run: cargo fmt --check
+      
+      - name: Clippy
+        run: cargo clippy --all-features -- -D warnings

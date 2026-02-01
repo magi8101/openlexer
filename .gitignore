@@ -1,0 +1,27 @@
+# Build artifacts
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated code output
+/output/
+
+# Trunk/WASM build output
+/dist/
+
+# Test artifacts
+*.class
+*.pyc
+__pycache__/
+*.exe
+*.o
+*.obj

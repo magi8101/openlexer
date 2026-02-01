@@ -1,0 +1,72 @@
+[package]
+name = "openlexer"
+version = "0.1.0"
+edition = "2021"
+description = "Flex/Bison replacement - Lexer and Parser generator for C, Java, Python"
+license = "MIT"
+keywords = ["lexer", "parser", "flex", "bison", "compiler"]
+categories = ["parsing", "development-tools", "compilers"]
+repository = "https://github.com/example/openlexer"
+readme = "README.md"
+
+[[bin]]
+name = "openlexer"
+path = "src/main.rs"
+
+[[bin]]
+name = "openlexer-gui"
+path = "src/gui.rs"
+required-features = ["gui"]
+
+[lib]
+name = "openlexer_lib"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+gui = ["eframe", "egui_extras", "rfd"]
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# GUI (optional)
+eframe = { version = "0.29", optional = true, default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+    "wgpu",
+] }
+egui_extras = { version = "0.29", optional = true }
+
+# Native file dialogs (optional, desktop only)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = { version = "0.14", optional = true }
+
+# WASM support
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Window",
+    "Document",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "HtmlAnchorElement",
+] }
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
+[profile.release]
+opt-level = "s"
+lto = true
