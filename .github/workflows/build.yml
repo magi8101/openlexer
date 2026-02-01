@@ -32,7 +32,7 @@ jobs:
         run: cargo install trunk
       
       - name: Build WASM
-        run: trunk build --release=true web/index.html
+        run: trunk build --release=true --public-url /openlexer/ web/index.html
       
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
