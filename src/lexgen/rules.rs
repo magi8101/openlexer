@@ -679,7 +679,7 @@ fn split_pattern_action_flex(
     line: &str, 
     all_lines: &[&str], 
     current_idx: usize,
-    line_number: usize
+    _line_number: usize
 ) -> Result<(String, String, usize)> {
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;

@@ -26,8 +26,8 @@ mod web_utils {
         let blob_parts = js_sys::Array::new();
         blob_parts.push(&JsValue::from_str(content));
         
-        let mut options = BlobPropertyBag::new();
-        options.type_("text/plain;charset=utf-8");
+        let options = BlobPropertyBag::new();
+        options.set_type("text/plain;charset=utf-8");
         
         let blob = Blob::new_with_str_sequence_and_options(&blob_parts, &options)
             .expect("failed to create blob");
@@ -206,6 +206,7 @@ fn code_viewer_with_lines(
 enum LogLevel {
     Info,
     Success,
+    #[allow(dead_code)]
     Warning,
     Error,
 }
@@ -398,6 +399,9 @@ fn chrono_lite_time() -> String {
 
 impl eframe::App for OpenLexerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Request repaint for cursor blinking (especially important for WASM)
+        ctx.request_repaint();
+        
         let screen_rect = ctx.screen_rect();
         let _is_narrow = screen_rect.width() < 800.0;
         let is_mobile = screen_rect.width() < 500.0;
@@ -710,10 +714,7 @@ factor:
 
 // WASM entry point
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::*;
-
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(start)]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub async fn start() -> Result<(), JsValue> {
     // Redirect panics to console.error
     console_error_panic_hook::set_once();
