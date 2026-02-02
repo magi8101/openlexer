@@ -1,8 +1,6 @@
 # OpenLexer
 
 A modern Flex/Bison replacement that generates lexers and parsers in **C**, **Java**, and **Python**.
-
-[![Build](https://github.com/example/openlexer/actions/workflows/build.yml/badge.svg)](https://github.com/example/openlexer/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Features
