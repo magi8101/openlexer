@@ -13,13 +13,9 @@ A modern Flex/Bison replacement that generates lexers and parsers in **C**, **Ja
 
 ## Try Online
 
-Visit the [web demo](https://example.github.io/openlexer) to try OpenLexer in your browser.
+Visit the [web demo](https://magi8101.github.io/openlexer/) to try OpenLexer in your browser.
 
 ## Installation
-
-### Pre-built Binaries
-
-Download from [Releases](https://github.com/example/openlexer/releases).
 
 ### Build from Source
 
