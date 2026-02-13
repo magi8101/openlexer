@@ -1442,5 +1442,4 @@ pub async fn start() -> Result<(), JsValue> {
     Ok(())
 }
 
-#[cfg(target_arch = "wasm32")]
-fn main() {}
+
