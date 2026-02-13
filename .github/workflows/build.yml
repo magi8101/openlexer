@@ -23,9 +23,6 @@ jobs:
           rustup set profile minimal
           rustup target add wasm32-unknown-unknown
       
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      
       - name: Download and install Trunk binary
         run: wget -qO- https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
       
@@ -33,6 +30,9 @@ jobs:
         uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: 'latest'
+      
+      - name: Clean build artifacts
+        run: cargo clean
       
       - name: Build WASM app
         run: ./trunk build --release --public-url $public_url web/index.html
