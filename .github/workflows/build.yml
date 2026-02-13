@@ -29,9 +29,10 @@ jobs:
       - name: Download and install Trunk binary
         run: wget -qO- https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
       
-      - name: Install mdBook
-        run: |
-          wget -qO- https://github.com/rust-lang/mdBook/releases/latest/download/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
+      - name: Setup mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
       
       - name: Build WASM app
         run: ./trunk build --release --public-url $public_url web/index.html
@@ -39,7 +40,7 @@ jobs:
           public_url: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
       
       - name: Build documentation
-        run: ./mdbook build docs
+        run: mdbook build docs
       
       - name: Copy docs to dist
         run: cp -r docs/book dist/docs
