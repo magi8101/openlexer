@@ -3,17 +3,18 @@
 //! Converts regex patterns to NFA (Thompson), then DFA (subset construction),
 //! and generates lexer code in C, Java, or Python.
 
-pub mod regex;
-pub mod nfa;
-pub mod dfa;
 pub mod codegen;
+pub mod dfa;
+pub mod nfa;
+pub mod regex;
 pub mod rules;
+pub mod unicode;
 
-pub use regex::{Regex, RegexAst, CharClass, CharRange};
-pub use nfa::Nfa;
-pub use dfa::Dfa;
-pub use rules::{LexerSpec, LexerRule, RuleAction};
 pub use codegen::TargetLanguage;
+pub use dfa::Dfa;
+pub use nfa::Nfa;
+pub use regex::{CharClass, CharRange, Regex, RegexAst};
+pub use rules::{LexerRule, LexerSpec, RuleAction};
 
 use crate::error::Result;
 
@@ -31,4 +32,15 @@ pub fn generate_code(spec: &LexerSpec, lang: &str) -> Result<String> {
         _ => return Err(crate::error::Error::InvalidLanguage(lang.to_string())),
     };
     codegen::generate_lexer_from_spec_with_conditions(spec, target)
+}
+
+/// Generate a standalone test driver for the given language.
+/// This can be used independently or is already embedded in generate_code output.
+pub fn generate_test_driver(lang: &str) -> Result<String> {
+    match lang.to_lowercase().as_str() {
+        "c" => Ok(codegen::generate_c_test_driver()),
+        "java" => Ok(codegen::generate_java_test_driver()),
+        "python" | "py" => Ok(codegen::generate_python_test_driver()),
+        _ => Err(crate::error::Error::InvalidLanguage(lang.to_string())),
+    }
 }

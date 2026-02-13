@@ -2,9 +2,9 @@
 //!
 //! Converts a Regex AST into a Non-deterministic Finite Automaton (NFA).
 
-use crate::lexgen::regex::{Regex, CharClass};
-use crate::lexgen::rules::LexerSpec;
 use crate::error::Result;
+use crate::lexgen::regex::{CharClass, Regex};
+use crate::lexgen::rules::LexerSpec;
 
 /// A state in the NFA.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +22,8 @@ pub struct State {
 pub enum Transition {
     /// Transition on a specific character.
     Char(char, usize),
+    /// Transition on a codepoint range (inclusive). For Unicode support.
+    CharRange(u32, u32, usize),
     /// Epsilon transition (no input consumed).
     Epsilon(usize),
 }
@@ -65,6 +67,13 @@ impl Nfa {
         self.states[from].transitions.push(Transition::Char(c, to));
     }
 
+    /// Adds a codepoint range transition from `from` to `to`.
+    fn add_char_range_transition(&mut self, from: usize, to: usize, start_cp: u32, end_cp: u32) {
+        self.states[from]
+            .transitions
+            .push(Transition::CharRange(start_cp, end_cp, to));
+    }
+
     /// Adds an epsilon transition from `from` to `to`.
     fn add_epsilon_transition(&mut self, from: usize, to: usize) {
         self.states[from].transitions.push(Transition::Epsilon(to));
@@ -86,7 +95,7 @@ impl Nfa {
     /// Creates a new start state with epsilon transitions to each rule's NFA.
     pub fn from_lexer_spec(spec: &LexerSpec) -> Result<Self> {
         let mut nfa = Nfa::new();
-        
+
         // Create a unified start state
         let unified_start = nfa.add_state(false);
         nfa.start_state = unified_start;
@@ -94,10 +103,10 @@ impl Nfa {
         // Build NFA for each rule and connect to unified start
         for (rule_idx, rule) in spec.rules.iter().enumerate() {
             let (rule_start, rule_end) = nfa.build_subgraph(&rule.regex.root)?;
-            
+
             // Connect unified start to this rule's start
             nfa.add_epsilon_transition(unified_start, rule_start);
-            
+
             // Mark the rule's end state as accepting with the rule index
             nfa.states[rule_end].is_accepting = true;
             nfa.states[rule_end].rule_index = Some(rule_idx);
@@ -106,26 +115,25 @@ impl Nfa {
 
         Ok(nfa)
     }
-    
+
     /// Builds an NFA for a specific start condition.
     /// Only includes rules that are active in the given condition.
     /// - Rules with no start conditions are included if condition_type is Inclusive
     /// - Rules with explicit start conditions are included if condition matches
     /// - The <*> condition (represented by having all conditions) is handled by the caller
-    pub fn from_lexer_spec_for_condition(
-        spec: &LexerSpec, 
-        condition: &str,
-    ) -> Result<Self> {
+    pub fn from_lexer_spec_for_condition(spec: &LexerSpec, condition: &str) -> Result<Self> {
         use crate::lexgen::rules::StartConditionType;
-        
+
         let mut nfa = Nfa::new();
-        
+
         // Create a unified start state
         let unified_start = nfa.add_state(false);
         nfa.start_state = unified_start;
-        
+
         // Determine if this condition is inclusive or exclusive
-        let condition_type = spec.start_conditions.get(condition)
+        let condition_type = spec
+            .start_conditions
+            .get(condition)
             .copied()
             .unwrap_or(StartConditionType::Inclusive);
 
@@ -138,16 +146,16 @@ impl Nfa {
                 // Rule has explicit conditions - check if our condition is listed
                 rule.start_conditions.iter().any(|c| c == condition)
             };
-            
+
             if !is_active {
                 continue;
             }
-            
+
             let (rule_start, rule_end) = nfa.build_subgraph(&rule.regex.root)?;
-            
+
             // Connect unified start to this rule's start
             nfa.add_epsilon_transition(unified_start, rule_start);
-            
+
             // Mark the rule's end state as accepting with the rule index
             nfa.states[rule_end].is_accepting = true;
             nfa.states[rule_end].rule_index = Some(rule_idx);
@@ -184,17 +192,17 @@ impl Nfa {
             Regex::Concat(lhs, rhs) => {
                 let (start1, end1) = self.build_subgraph(lhs)?;
                 let (start2, end2) = self.build_subgraph(rhs)?;
-                
+
                 // Connect end of lhs to start of rhs with epsilon
                 self.add_epsilon_transition(end1, start2);
-                
+
                 // Result is start1 -> ... -> end1 -> start2 -> ... -> end2
                 Ok((start1, end2))
             }
             Regex::Union(lhs, rhs) => {
                 let (start1, end1) = self.build_subgraph(lhs)?;
                 let (start2, end2) = self.build_subgraph(rhs)?;
-                
+
                 let new_start = self.add_state(false);
                 let new_end = self.add_state(false);
 
@@ -210,7 +218,7 @@ impl Nfa {
             }
             Regex::Star(inner) => {
                 let (start, end) = self.build_subgraph(inner)?;
-                
+
                 let new_start = self.add_state(false);
                 let new_end = self.add_state(false);
 
@@ -220,7 +228,7 @@ impl Nfa {
 
                 // Loop back
                 self.add_epsilon_transition(end, start);
-                
+
                 // Exit
                 self.add_epsilon_transition(end, new_end);
 
@@ -229,16 +237,16 @@ impl Nfa {
             Regex::Plus(inner) => {
                 // a+ is aa*
                 let (start, end) = self.build_subgraph(inner)?;
-                
+
                 let new_start = self.add_state(false);
                 let new_end = self.add_state(false);
 
                 // Must enter at least once
                 self.add_epsilon_transition(new_start, start);
-                
+
                 // Loop back
                 self.add_epsilon_transition(end, start);
-                
+
                 // Exit
                 self.add_epsilon_transition(end, new_end);
 
@@ -247,7 +255,7 @@ impl Nfa {
             Regex::Question(inner) => {
                 // a? is union of a and epsilon
                 let (start, end) = self.build_subgraph(inner)?;
-                
+
                 let new_start = self.add_state(false);
                 let new_end = self.add_state(false); // Can reuse end actually, but let's be strict Thompson
 
@@ -262,16 +270,43 @@ impl Nfa {
     }
 
     /// Builds an NFA subgraph for a character class.
-    /// Uses a single start and end state with transitions for each matching character.
+    /// Uses range-based transitions to avoid exploding state space for Unicode.
     fn build_char_class(&mut self, class: &CharClass) -> Result<(usize, usize)> {
         let start = self.add_state(false);
         let end = self.add_state(false);
 
-        // Expand the character class to all matching ASCII characters
-        let chars = class.expand();
-        
-        for c in chars {
-            self.add_char_transition(start, end, c);
+        // Collect all ranges (both ASCII CharRange and Unicode ranges)
+        let mut all_ranges: Vec<(u32, u32)> = Vec::new();
+
+        // Convert ASCII CharRange to u32 ranges
+        for range in &class.ranges {
+            match range {
+                super::regex::CharRange::Single(c) => {
+                    let cp = *c as u32;
+                    all_ranges.push((cp, cp));
+                }
+                super::regex::CharRange::Range(start_c, end_c) => {
+                    all_ranges.push((*start_c as u32, *end_c as u32));
+                }
+            }
+        }
+
+        // Add Unicode property ranges
+        for range in &class.unicode_ranges {
+            all_ranges.push((*range.start(), *range.end()));
+        }
+
+        // Handle negation by computing complement
+        let ranges_to_use = if class.negated {
+            compute_complement_ranges(&all_ranges)
+        } else {
+            // Sort and merge overlapping ranges for efficiency
+            merge_ranges(&all_ranges)
+        };
+
+        // Add range transitions
+        for (range_start, range_end) in ranges_to_use {
+            self.add_char_range_transition(start, end, range_start, range_end);
         }
 
         Ok((start, end))
@@ -293,4 +328,66 @@ impl Nfa {
 
         Ok((start, end))
     }
+}
+/// Merges overlapping and adjacent ranges into a minimal set.
+fn merge_ranges(ranges: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sorted: Vec<(u32, u32)> = ranges.to_vec();
+    sorted.sort_by_key(|r| r.0);
+
+    let mut result: Vec<(u32, u32)> = Vec::new();
+    let mut current = sorted[0];
+
+    for &(start, end) in &sorted[1..] {
+        // Check if overlapping or adjacent (current.1 + 1 >= start)
+        if current.1 >= start || (current.1 < u32::MAX && current.1 + 1 >= start) {
+            // Merge
+            current.1 = std::cmp::max(current.1, end);
+        } else {
+            result.push(current);
+            current = (start, end);
+        }
+    }
+    result.push(current);
+
+    result
+}
+
+/// Computes the complement of a set of ranges within Unicode BMP (0x0000 - 0xFFFF).
+/// Excludes surrogate pairs (0xD800 - 0xDFFF) which are invalid Unicode scalar values.
+fn compute_complement_ranges(ranges: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let merged = merge_ranges(ranges);
+    let mut complement: Vec<(u32, u32)> = Vec::new();
+
+    // Unicode valid ranges: 0x0000 - 0xD7FF and 0xE000 - 0x10FFFF
+    // For now, limit to BMP excluding surrogates
+    let valid_ranges = vec![(0u32, 0xD7FFu32), (0xE000u32, 0xFFFFu32)];
+
+    for (valid_start, valid_end) in valid_ranges {
+        let mut pos = valid_start;
+
+        for &(ex_start, ex_end) in &merged {
+            // Skip ranges outside current valid range
+            if ex_end < valid_start || ex_start > valid_end {
+                continue;
+            }
+
+            let ex_start_clamped = std::cmp::max(ex_start, valid_start);
+            let ex_end_clamped = std::cmp::min(ex_end, valid_end);
+
+            if pos < ex_start_clamped {
+                complement.push((pos, ex_start_clamped - 1));
+            }
+            pos = ex_end_clamped.saturating_add(1);
+        }
+
+        if pos <= valid_end {
+            complement.push((pos, valid_end));
+        }
+    }
+
+    complement
 }

@@ -18,6 +18,9 @@ Thumbs.db
 # Trunk/WASM build output
 /dist/
 
+# Documentation build output
+/docs/book/
+
 # Test artifacts
 *.class
 *.pyc

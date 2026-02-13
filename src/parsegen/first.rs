@@ -15,12 +15,12 @@ impl FirstFollow {
             first: HashMap::new(),
             follow: HashMap::new(),
         };
-        
+
         // Initialize sets
         for rule in &grammar.rules {
             ff.first.entry(rule.lhs.clone()).or_default();
             ff.follow.entry(rule.lhs.clone()).or_default();
-            
+
             for sym in &rule.rhs {
                 if let Symbol::NonTerminal(nt) = sym {
                     ff.first.entry(nt.clone()).or_default();
@@ -28,10 +28,10 @@ impl FirstFollow {
                 }
             }
         }
-        
+
         ff.compute_first(grammar);
         ff.compute_follow(grammar);
-        
+
         ff
     }
 
@@ -39,15 +39,15 @@ impl FirstFollow {
         let mut changed = true;
         while changed {
             changed = false;
-            
+
             for rule in &grammar.rules {
                 let lhs = &rule.lhs;
                 let mut rhs_nullable = true;
-                
+
                 // For each symbol in RHS
                 for sym in &rule.rhs {
                     let mut sym_first = HashSet::new();
-                    
+
                     match sym {
                         Symbol::Terminal(t) => {
                             sym_first.insert(t.clone());
@@ -63,7 +63,7 @@ impl FirstFollow {
                             }
                         }
                     }
-                    
+
                     // Add sym_first to FIRST(lhs)
                     let lhs_first = self.first.entry(lhs.clone()).or_default();
                     let len_before = lhs_first.len();
@@ -71,19 +71,19 @@ impl FirstFollow {
                     if lhs_first.len() > len_before {
                         changed = true;
                     }
-                    
+
                     if !rhs_nullable {
                         break;
                     }
                 }
-                
+
                 // If entire RHS is nullable (or empty), add epsilon
                 if rule.rhs.is_empty() {
                     let lhs_first = self.first.entry(lhs.clone()).or_default();
-                     if !lhs_first.contains("EPSILON") {
+                    if !lhs_first.contains("EPSILON") {
                         lhs_first.insert("EPSILON".to_string());
                         changed = true;
-                     }
+                    }
                 }
             }
         }
@@ -91,28 +91,31 @@ impl FirstFollow {
 
     fn compute_follow(&mut self, grammar: &Grammar) {
         // Start symbol gets EOF ($)
-        self.follow.entry(grammar.start_symbol.clone()).or_default().insert("$".to_string());
-        
+        self.follow
+            .entry(grammar.start_symbol.clone())
+            .or_default()
+            .insert("$".to_string());
+
         let mut changed = true;
         while changed {
             changed = false;
-            
+
             // Collect all updates first to avoid conflicting borrows
             let mut updates: Vec<(String, HashSet<String>)> = Vec::new();
-            
+
             for rule in &grammar.rules {
                 let lhs = &rule.lhs;
-                
+
                 // We need FOLLOW(lhs) to propagate to end of RHS
                 // We can clone it efficiently here since we are inside the loop
                 // Clone follow_lhs here to avoid borrowing self.follow across the inner loop
                 let follow_lhs = self.follow.get(lhs).cloned().unwrap_or_default();
-                
+
                 for (i, sym) in rule.rhs.iter().enumerate() {
                     if let Symbol::NonTerminal(nt) = sym {
                         let mut trailer = HashSet::new();
                         let mut trailer_nullable = true;
-                        
+
                         // Look ahead at symbols following this NT
                         for next_sym in rule.rhs.iter().skip(i + 1) {
                             match next_sym {
@@ -137,19 +140,19 @@ impl FirstFollow {
                                 }
                             }
                         }
-                        
+
                         // If everything after nt is nullable, it inherits FOLLOW(lhs)
                         if trailer_nullable {
                             trailer.extend(follow_lhs.clone());
                         }
-                        
+
                         if !trailer.is_empty() {
                             updates.push((nt.clone(), trailer));
                         }
                     }
                 }
             }
-            
+
             // Apply updates
             for (nt, new_syms) in updates {
                 let follow_set = self.follow.entry(nt).or_default();

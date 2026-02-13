@@ -6,7 +6,7 @@ This document outlines planned enhancements to address current limitations compa
 
 ## Phase 1: Parser Enhancements
 
-### 1.1 GLR Parser Support
+### 1.1 GLR Parser Support [DONE]
 **Current**: LALR(1) only  
 **Target**: Add GLR option for ambiguous grammars
 
@@ -147,7 +147,7 @@ int yymore_flag = 0;
 
 ---
 
-### 2.3 Unicode/UTF-8 Support
+### 2.3 Unicode/UTF-8 Support [DONE]
 **Current**: ASCII only (0-127)  
 **Target**: Full Unicode support
 
@@ -212,29 +212,30 @@ typedef struct YYLTYPE {
 
 | # | Feature | Complexity | Impact | Status |
 |---|---------|------------|--------|--------|
-| 1 | Dynamic Stack | Low | Medium | Planned |
-| 2 | %union Support | Medium | High | Planned |
-| 3 | Error Recovery (LAC) | Medium | High | Planned |
-| 4 | User Code Actions | Medium | High | Planned |
-| 5 | Unicode Support | High | Medium | Planned |
-| 6 | yymore/yyless/REJECT | Medium | Low | Planned |
-| 7 | GLR Parser | High | Medium | Planned |
-| 8 | Location Tracking | Medium | Medium | Planned |
-| 9 | Runtime Libraries | Low | Low | Planned |
+| 1 | Dynamic Stack | Low | Medium | **Done** |
+| 2 | %union Support | Medium | High | **Done** |
+| 3 | Error Recovery (LAC) | Medium | High | **Done** |
+| 4 | User Code Actions | Medium | High | **Done** |
+| 5 | Unicode Support | High | Medium | **Done** |
+| 6 | yymore/yyless/REJECT | Medium | Low | **Done** |
+| 7 | GLR Parser | High | Medium | **Done** |
+| 8 | Location Tracking | Medium | Medium | **Done** |
+| 9 | Runtime Libraries | Low | Low | **Done** (C, Python, Java)
 
 ---
 
 ## Files Summary
 
 ### New Files to Create
-| File | Purpose |
-|------|---------|
-| `src/parsegen/glr.rs` | GLR parsing algorithm |
-| `src/parsegen/error_recovery.rs` | LAC and error handling |
-| `src/lexgen/unicode.rs` | Unicode support utilities |
-| `lib/c/libol.h` | Common C header |
-| `lib/c/libol_lexer.c` | Lexer runtime library |
-| `lib/c/libol_parser.c` | Parser runtime library |
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/parsegen/glr.rs` | GLR parsing algorithm | **Done** |
+| `src/lexgen/unicode.rs` | Unicode support utilities | **Done** |
+| `lib/c/libol.h` | Common C header | **Done** |
+| `lib/c/libol_lexer.c` | Lexer runtime library | **Done** |
+| `lib/c/libol_parser.c` | Parser runtime library | **Done** |
+| `lib/python/libol.py` | Python runtime library | **Done** |
+| `lib/java/org/openlexer/runtime/*.java` | Java runtime package | **Done** |
 
 ### Files to Modify
 | File | Changes |

@@ -1,8 +1,10 @@
-pub mod grammar;
-pub mod first;
-pub mod lalr;
 pub mod codegen;
+pub mod first;
+pub mod glr;
+pub mod grammar;
+pub mod lalr;
 
+pub use glr::{GlrParser, GlrTable, ParseForest, Token as GlrToken};
 pub use grammar::{Grammar, Rule};
 pub use lalr::ParsingTable;
 

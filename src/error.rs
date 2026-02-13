@@ -32,6 +32,10 @@ pub enum Error {
     #[error("LALR table construction failed: {0}")]
     LalrError(String),
 
+    /// Parse error during GLR parsing
+    #[error("Parse error at position {position}: {message}")]
+    ParseError { position: usize, message: String },
+
     /// Code generation error
     #[error("Code generation failed: {0}")]
     CodegenError(String),

@@ -29,10 +29,20 @@ jobs:
       - name: Download and install Trunk binary
         run: wget -qO- https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
       
-      - name: Build
+      - name: Install mdBook
+        run: |
+          wget -qO- https://github.com/rust-lang/mdBook/releases/latest/download/mdbook-v0.4.40-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
+      
+      - name: Build WASM app
         run: ./trunk build --release --public-url $public_url web/index.html
         env:
           public_url: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+      
+      - name: Build documentation
+        run: ./mdbook build docs
+      
+      - name: Copy docs to dist
+        run: cp -r docs/book dist/docs
       
       - name: Deploy
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
