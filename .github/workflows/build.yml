@@ -26,11 +26,6 @@ jobs:
       - name: Download and install Trunk binary
         run: wget -qO- https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
       
-      - name: Setup mdBook
-        uses: peaceiris/actions-mdbook@v2
-        with:
-          mdbook-version: 'latest'
-      
       - name: Clean build artifacts
         run: cargo clean
       
@@ -39,13 +34,8 @@ jobs:
         env:
           public_url: "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
       
-      - name: Build documentation
-        run: mdbook build docs
-      
-      - name: Copy docs to dist
-        run: |
-          cp -r docs/book dist/docs
-          touch dist/.nojekyll
+      - name: Add .nojekyll
+        run: touch dist/.nojekyll
       
       - name: Deploy
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
