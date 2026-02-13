@@ -1,0 +1,14 @@
+# Read the Docs configuration file
+# See https://docs.readthedocs.io/en/stable/config-file/v2.html
+
+version: 2
+
+build:
+  os: ubuntu-22.04
+  tools:
+    rust: "1.75"
+  commands:
+    - cargo install mdbook --version 0.4.40 --locked
+    - mdbook build docs
+    - mkdir -p $READTHEDOCS_OUTPUT/html
+    - cp -r docs/book/* $READTHEDOCS_OUTPUT/html/
