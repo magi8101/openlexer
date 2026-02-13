@@ -1409,37 +1409,37 @@ stmt:
 // ============================================================================
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen(start)]
-pub async fn start() -> Result<(), JsValue> {
+fn main() {
+    // Redirect traps to console.error
     console_error_panic_hook::set_once();
 
-    let web_options = eframe::WebOptions::default();
+    wasm_bindgen_futures::spawn_local(async {
+        let web_options = eframe::WebOptions::default();
 
-    let document = web_sys::window()
-        .expect("No window")
-        .document()
-        .expect("No document");
+        let document = web_sys::window()
+            .expect("No window")
+            .document()
+            .expect("No document");
 
-    let canvas = document
-        .get_element_by_id("openlexer_canvas")
-        .expect("No canvas element with id 'openlexer_canvas'")
-        .dyn_into::<web_sys::HtmlCanvasElement>()
-        .expect("Element is not a canvas");
+        let canvas = document
+            .get_element_by_id("openlexer_canvas")
+            .expect("No canvas element with id 'openlexer_canvas'")
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .expect("Element is not a canvas");
 
-    if let Some(loading) = document.get_element_by_id("loading") {
-        let _ = loading.set_attribute("style", "display: none !important;");
-    }
+        if let Some(loading) = document.get_element_by_id("loading") {
+            let _ = loading.set_attribute("style", "display: none !important;");
+        }
 
-    eframe::WebRunner::new()
-        .start(
-            canvas,
-            web_options,
-            Box::new(|cc| Ok(Box::new(OpenLexerApp::new(cc)))),
-        )
-        .await
-        .map_err(|e| JsValue::from_str(&format!("{:?}", e)))?;
-
-    Ok(())
+        eframe::WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|cc| Ok(Box::new(OpenLexerApp::new(cc)))),
+            )
+            .await
+            .expect("failed to start eframe");
+    });
 }
 
 
