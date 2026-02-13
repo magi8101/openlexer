@@ -43,7 +43,9 @@ jobs:
         run: mdbook build docs
       
       - name: Copy docs to dist
-        run: cp -r docs/book dist/docs
+        run: |
+          cp -r docs/book dist/docs
+          touch dist/.nojekyll
       
       - name: Deploy
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
