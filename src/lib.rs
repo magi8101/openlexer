@@ -27,5 +27,6 @@
 pub mod error;
 pub mod lexgen;
 pub mod parsegen;
+pub mod debug;
 
 pub use error::{Error, Result};

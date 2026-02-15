@@ -4,12 +4,675 @@ use crate::error::Result;
 use crate::lexgen::codegen::TargetLanguage;
 use crate::parsegen::grammar::{Grammar, Rule, Symbol};
 use crate::parsegen::lalr::{Action, ParsingTable};
+use std::collections::HashMap;
+
+/// Returns true if the grammar uses advanced features requiring the full codegen path.
+fn grammar_needs_advanced(grammar: &Grammar) -> bool {
+    grammar.has_union()
+        || grammar.locations
+        || !grammar.destructors.is_empty()
+        || grammar.lac_enabled
+        || grammar.glr_mode
+        || grammar.prologue.is_some()
+        || grammar.error_verbose
+}
+
+/// Helper: build symbol-to-integer mappings for compact table encoding.
+/// Returns (terminal_ids, nonterminal_ids, num_states).
+fn build_symbol_ids(
+    table: &ParsingTable,
+    grammar: &Grammar,
+) -> (HashMap<String, usize>, HashMap<String, usize>, usize) {
+    // Terminals: all declared tokens + "$" for EOF
+    let mut term_ids: HashMap<String, usize> = HashMap::new();
+    term_ids.insert("$".to_string(), 0);
+    for (i, tok) in grammar.tokens.iter().enumerate() {
+        term_ids.insert(tok.clone(), i + 1);
+    }
+
+    // Nonterminals: collect all unique LHS symbols from rules
+    let mut nt_ids: HashMap<String, usize> = HashMap::new();
+    let mut nt_idx = 0;
+    for rule in &grammar.rules {
+        if !nt_ids.contains_key(&rule.lhs) {
+            nt_ids.insert(rule.lhs.clone(), nt_idx);
+            nt_idx += 1;
+        }
+    }
+
+    // Count states
+    let num_states = {
+        let mut max_s = 0usize;
+        for &s in table.action.keys() {
+            if s > max_s { max_s = s; }
+        }
+        for &s in table.goto.keys() {
+            if s > max_s { max_s = s; }
+        }
+        max_s + 1
+    };
+
+    (term_ids, nt_ids, num_states)
+}
+
+/// Translate $$ and $N in semantic actions for minimal C output.
+/// Simple integer-only substitution (no union support).
+fn substitute_vars_c_minimal(action: &str, rhs_len: usize) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = action.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() {
+            if chars[i + 1] == '$' {
+                out.push_str("yyval");
+                i += 2;
+            } else if chars[i + 1].is_ascii_digit() {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let num_str: String = chars[i + 1..j].iter().collect();
+                if let Ok(n) = num_str.parse::<usize>() {
+                    if n > 0 && n <= rhs_len {
+                        out.push_str(&format!("vs[sp-{}]", rhs_len - n));
+                    } else {
+                        out.push('0');
+                    }
+                }
+                i = j;
+            } else {
+                out.push('$');
+                i += 1;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Translate $$ and $N in semantic actions for minimal Java output.
+fn substitute_vars_java_minimal(action: &str, rhs_len: usize) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = action.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() {
+            if chars[i + 1] == '$' {
+                out.push_str("yyval");
+                i += 2;
+            } else if chars[i + 1].is_ascii_digit() {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let num_str: String = chars[i + 1..j].iter().collect();
+                if let Ok(n) = num_str.parse::<usize>() {
+                    if n > 0 && n <= rhs_len {
+                        out.push_str(&format!("vs[sp-{}]", rhs_len - n));
+                    } else {
+                        out.push_str("0");
+                    }
+                }
+                i = j;
+            } else {
+                out.push('$');
+                i += 1;
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out = out.replace("printf(", "System.out.printf(");
+    out
+}
+
+/// Translate $$ and $N in semantic actions for minimal Python output.
+fn substitute_vars_python_minimal(action: &str, rhs_len: usize) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = action.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() {
+            if chars[i + 1] == '$' {
+                out.push_str("yyval");
+                i += 2;
+            } else if chars[i + 1].is_ascii_digit() {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                let num_str: String = chars[i + 1..j].iter().collect();
+                if let Ok(n) = num_str.parse::<usize>() {
+                    if n > 0 && n <= rhs_len {
+                        out.push_str(&format!("vs[sp-{}]", rhs_len - n));
+                    } else {
+                        out.push_str("0");
+                    }
+                }
+                i = j;
+            } else {
+                out.push('$');
+                i += 1;
+            }
+        } else if chars[i] == ';' {
+            i += 1; // skip C semicolons
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out = out.replace("printf(", "print(");
+    out = out.replace("%d", "{}");
+    out = out.replace("\\n", "");
+    out
+}
+
+// =============================================================================
+// Minimal parser generators (~60 lines output for simple grammars)
+// =============================================================================
+
+fn generate_c_minimal(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
+    let (term_ids, nt_ids, num_states) = build_symbol_ids(table, grammar);
+    let num_terms = term_ids.len();
+    let num_nts = nt_ids.len();
+    let num_rules = grammar.rules.len();
+
+    let mut c = String::new();
+    c.push_str("/* Parser generated by OpenLexer */\n");
+    c.push_str("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <ctype.h>\n\n");
+
+    // Token IDs as defines
+    c.push_str("#define T_EOF 0\n");
+    for (tok, &id) in &term_ids {
+        if tok != "$" {
+            c.push_str(&format!("#define T_{} {}\n", tok.to_uppercase(), id));
+        }
+    }
+    c.push_str("\n");
+
+    // Action table: positive = shift to state, negative = reduce by rule, 0 = error, -9999 = accept
+    c.push_str(&format!("static int ACT[{}][{}] = {{\n", num_states, num_terms));
+    for s in 0..num_states {
+        c.push_str("  {");
+        for t in 0..num_terms {
+            let val = if let Some(actions) = table.action.get(&s) {
+                // Find the terminal name for this id
+                let term_name = term_ids.iter().find(|(_, &v)| v == t).map(|(k, _)| k.as_str()).unwrap_or("");
+                match actions.get(term_name) {
+                    Some(Action::Shift(n)) => *n as i32 + 1, // +1 so 0 means error
+                    Some(Action::Reduce(n)) => -(*n as i32) - 1, // -1 so -1 means rule 0
+                    Some(Action::Accept) => -9999,
+                    None => 0,
+                }
+            } else {
+                0
+            };
+            if t > 0 { c.push(','); }
+            c.push_str(&format!("{}", val));
+        }
+        c.push_str("},\n");
+    }
+    c.push_str("};\n\n");
+
+    // Goto table
+    c.push_str(&format!("static int GOTO[{}][{}] = {{\n", num_states, num_nts));
+    for s in 0..num_states {
+        c.push_str("  {");
+        for nt in 0..num_nts {
+            let val = if let Some(gotos) = table.goto.get(&s) {
+                let nt_name = nt_ids.iter().find(|(_, &v)| v == nt).map(|(k, _)| k.as_str()).unwrap_or("");
+                match gotos.get(nt_name) {
+                    Some(&n) => n as i32,
+                    None => -1,
+                }
+            } else {
+                -1
+            };
+            if nt > 0 { c.push(','); }
+            c.push_str(&format!("{}", val));
+        }
+        c.push_str("},\n");
+    }
+    c.push_str("};\n\n");
+
+    // Rule info: LHS nonterminal ID and RHS length
+    c.push_str(&format!("static int RLHS[{}] = {{", num_rules));
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if i > 0 { c.push(','); }
+        c.push_str(&format!("{}", nt_ids.get(&rule.lhs).unwrap_or(&0)));
+    }
+    c.push_str("};\n");
+    c.push_str(&format!("static int RLEN[{}] = {{", num_rules));
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if i > 0 { c.push(','); }
+        c.push_str(&format!("{}", rule.rhs.len()));
+    }
+    c.push_str("};\n\n");
+
+    // Stack and parser
+    c.push_str("static int ss[512], vs[512], sp;\n\n");
+
+    // Inline tokenizer
+    c.push_str("static const char *input_ptr;\nstatic int yylval;\n\n");
+    c.push_str("int yylex(void) {\n");
+    c.push_str("    while (*input_ptr == ' ' || *input_ptr == '\\t' || *input_ptr == '\\n') input_ptr++;\n");
+    c.push_str("    if (*input_ptr == 0) return T_EOF;\n");
+    c.push_str("    if (isdigit(*input_ptr)) {\n");
+    c.push_str("        yylval = 0;\n");
+    c.push_str("        while (isdigit(*input_ptr)) { yylval = yylval * 10 + (*input_ptr - '0'); input_ptr++; }\n");
+    // Find the NUMBER token
+    let number_tid = term_ids.get("NUMBER").or_else(|| term_ids.get("number")).or_else(|| term_ids.get("NUM"));
+    if let Some(&tid) = number_tid {
+        c.push_str(&format!("        return {};\n", tid));
+    } else {
+        // If no NUMBER token, just return the first non-operator token or use a fallback
+        c.push_str("        return -1; /* No NUMBER token defined */\n");
+    }
+    c.push_str("    }\n");
+
+    // Single-character tokens
+    c.push_str("    yylval = 0;\n");
+    c.push_str("    char ch = *input_ptr++;\n");
+    // Map single-char token names to their IDs
+    for (tok, &id) in &term_ids {
+        if tok.len() == 1 && tok != "$" {
+            let ch = tok.chars().next().unwrap();
+            c.push_str(&format!("    if (ch == '{}') return {};\n",
+                if ch == '\'' { "\\'" } else { &tok },
+                id
+            ));
+        } else if tok.len() > 1 && tok != "$" {
+            // Multi-char token names like PLUS, MINUS etc.
+            // Check if the grammar maps operator names to single chars
+            match tok.to_uppercase().as_str() {
+                "PLUS" => c.push_str(&format!("    if (ch == '+') return {};\n", id)),
+                "MINUS" | "SUB" => c.push_str(&format!("    if (ch == '-') return {};\n", id)),
+                "TIMES" | "MUL" | "STAR" | "MULTIPLY" => c.push_str(&format!("    if (ch == '*') return {};\n", id)),
+                "DIVIDE" | "DIV" | "SLASH" => c.push_str(&format!("    if (ch == '/') return {};\n", id)),
+                "LPAREN" | "LPAR" => c.push_str(&format!("    if (ch == '(') return {};\n", id)),
+                "RPAREN" | "RPAR" => c.push_str(&format!("    if (ch == ')') return {};\n", id)),
+                "EQUALS" | "EQ" | "ASSIGN" => c.push_str(&format!("    if (ch == '=') return {};\n", id)),
+                "SEMICOLON" | "SEMI" => c.push_str(&format!("    if (ch == ';') return {};\n", id)),
+                "COMMA" => c.push_str(&format!("    if (ch == ',') return {};\n", id)),
+                "MOD" | "MODULO" | "PERCENT" => c.push_str(&format!("    if (ch == '%%') return {};\n", id)),
+                "POW" | "POWER" | "CARET" => c.push_str(&format!("    if (ch == '^') return {};\n", id)),
+                _ => {}
+            }
+        }
+    }
+    c.push_str("    return T_EOF;\n");
+    c.push_str("}\n\n");
+
+    // Parse function
+    c.push_str("int yyparse(const char *src) {\n");
+    c.push_str("    input_ptr = src; sp = 0; ss[0] = 0; vs[0] = 0;\n");
+    c.push_str("    int tok = yylex(), yyval;\n");
+    c.push_str("    while (1) {\n");
+    c.push_str("        int a = ACT[ss[sp]][tok];\n");
+    c.push_str("        if (a > 0) { sp++; ss[sp] = a-1; vs[sp] = yylval; tok = yylex(); }\n");
+    c.push_str("        else if (a == -9999) { return vs[sp]; }\n");
+    c.push_str("        else if (a < 0) {\n");
+    c.push_str("            int r = -(a+1), len = RLEN[r];\n");
+    c.push_str("            yyval = (len > 0) ? vs[sp-len+1] : 0;\n");
+
+    // Semantic actions
+    c.push_str("            switch(r) {\n");
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if let Some(action) = &rule.action {
+            let sub = substitute_vars_c_minimal(action, rule.rhs.len());
+            let trimmed = sub.trim();
+            if !trimmed.is_empty() {
+                c.push_str(&format!("                case {}: {} break;\n", i, trimmed));
+            }
+        }
+    }
+    c.push_str("            }\n");
+
+    c.push_str("            sp -= len;\n");
+    c.push_str("            int g = GOTO[ss[sp]][RLHS[r]];\n");
+    c.push_str("            sp++; ss[sp] = g; vs[sp] = yyval;\n");
+    c.push_str("        } else { printf(\"Syntax error at token %d\\n\", tok); return -1; }\n");
+    c.push_str("    }\n}\n\n");
+
+    // Test driver
+    c.push_str("#ifndef PARSER_NO_MAIN\n");
+    c.push_str("int main(int argc, char **argv) {\n");
+    c.push_str("    const char *expr = (argc > 1) ? argv[1] : \"3 + 4 * 2\";\n");
+    c.push_str("    printf(\"Input: \\\"%s\\\"\\n\", expr);\n");
+    c.push_str("    int result = yyparse(expr);\n");
+    c.push_str("    printf(\"Result: %d\\n\", result);\n");
+    c.push_str("    return 0;\n}\n");
+    c.push_str("#endif\n");
+
+    Ok(c)
+}
+
+fn generate_java_minimal(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
+    let (term_ids, nt_ids, num_states) = build_symbol_ids(table, grammar);
+    let num_terms = term_ids.len();
+    let num_nts = nt_ids.len();
+    let _num_rules = grammar.rules.len();
+
+    let mut c = String::new();
+    c.push_str("/** Parser generated by OpenLexer */\n");
+    c.push_str("public class Parser {\n");
+
+    // Token IDs
+    c.push_str("    static final int T_EOF = 0");
+    for (tok, &id) in &term_ids {
+        if tok != "$" {
+            c.push_str(&format!(", T_{} = {}", tok.to_uppercase(), id));
+        }
+    }
+    c.push_str(";\n\n");
+
+    // Action table
+    c.push_str(&format!("    static int[][] ACT = {{\n"));
+    for s in 0..num_states {
+        c.push_str("        {");
+        for t in 0..num_terms {
+            let val = if let Some(actions) = table.action.get(&s) {
+                let term_name = term_ids.iter().find(|(_, &v)| v == t).map(|(k, _)| k.as_str()).unwrap_or("");
+                match actions.get(term_name) {
+                    Some(Action::Shift(n)) => *n as i32 + 1,
+                    Some(Action::Reduce(n)) => -(*n as i32) - 1,
+                    Some(Action::Accept) => -9999,
+                    None => 0,
+                }
+            } else { 0 };
+            if t > 0 { c.push(','); }
+            c.push_str(&format!("{}", val));
+        }
+        c.push_str("},\n");
+    }
+    c.push_str("    };\n\n");
+
+    // Goto table
+    c.push_str(&format!("    static int[][] GT = {{\n"));
+    for s in 0..num_states {
+        c.push_str("        {");
+        for nt in 0..num_nts {
+            let val = if let Some(gotos) = table.goto.get(&s) {
+                let nt_name = nt_ids.iter().find(|(_, &v)| v == nt).map(|(k, _)| k.as_str()).unwrap_or("");
+                match gotos.get(nt_name) { Some(&n) => n as i32, None => -1 }
+            } else { -1 };
+            if nt > 0 { c.push(','); }
+            c.push_str(&format!("{}", val));
+        }
+        c.push_str("},\n");
+    }
+    c.push_str("    };\n\n");
+
+    // Rule LHS and RHS length
+    c.push_str("    static int[] RLHS = {");
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if i > 0 { c.push(','); }
+        c.push_str(&format!("{}", nt_ids.get(&rule.lhs).unwrap_or(&0)));
+    }
+    c.push_str("};\n");
+    c.push_str("    static int[] RLEN = {");
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if i > 0 { c.push(','); }
+        c.push_str(&format!("{}", rule.rhs.len()));
+    }
+    c.push_str("};\n\n");
+
+    // Lexer state
+    c.push_str("    static String src; static int pos; static int yylval;\n\n");
+
+    // Inline tokenizer
+    let number_tid = term_ids.get("NUMBER").or_else(|| term_ids.get("number")).or_else(|| term_ids.get("NUM"));
+    c.push_str("    static int yylex() {\n");
+    c.push_str("        while (pos < src.length() && Character.isWhitespace(src.charAt(pos))) pos++;\n");
+    c.push_str("        if (pos >= src.length()) return T_EOF;\n");
+    c.push_str("        if (Character.isDigit(src.charAt(pos))) {\n");
+    c.push_str("            yylval = 0;\n");
+    c.push_str("            while (pos < src.length() && Character.isDigit(src.charAt(pos)))\n");
+    c.push_str("                { yylval = yylval * 10 + (src.charAt(pos) - '0'); pos++; }\n");
+    if let Some(&tid) = number_tid {
+        c.push_str(&format!("            return {};\n", tid));
+    } else {
+        c.push_str("            return -1;\n");
+    }
+    c.push_str("        }\n");
+    c.push_str("        yylval = 0; char ch = src.charAt(pos++);\n");
+    for (tok, &id) in &term_ids {
+        if tok.len() == 1 && tok != "$" {
+            c.push_str(&format!("        if (ch == '{}') return {};\n", tok, id));
+        } else if tok.len() > 1 && tok != "$" {
+            match tok.to_uppercase().as_str() {
+                "PLUS" => c.push_str(&format!("        if (ch == '+') return {};\n", id)),
+                "MINUS" | "SUB" => c.push_str(&format!("        if (ch == '-') return {};\n", id)),
+                "TIMES" | "MUL" | "STAR" | "MULTIPLY" => c.push_str(&format!("        if (ch == '*') return {};\n", id)),
+                "DIVIDE" | "DIV" | "SLASH" => c.push_str(&format!("        if (ch == '/') return {};\n", id)),
+                "LPAREN" | "LPAR" => c.push_str(&format!("        if (ch == '(') return {};\n", id)),
+                "RPAREN" | "RPAR" => c.push_str(&format!("        if (ch == ')') return {};\n", id)),
+                "EQUALS" | "EQ" | "ASSIGN" => c.push_str(&format!("        if (ch == '=') return {};\n", id)),
+                "SEMICOLON" | "SEMI" => c.push_str(&format!("        if (ch == ';') return {};\n", id)),
+                "COMMA" => c.push_str(&format!("        if (ch == ',') return {};\n", id)),
+                "MOD" | "MODULO" | "PERCENT" => c.push_str(&format!("        if (ch == '%%') return {};\n", id)),
+                "POW" | "POWER" | "CARET" => c.push_str(&format!("        if (ch == '^') return {};\n", id)),
+                _ => {}
+            }
+        }
+    }
+    c.push_str("        return T_EOF;\n    }\n\n");
+
+    // Parse function
+    c.push_str("    static int parse(String input) {\n");
+    c.push_str("        src = input; pos = 0;\n");
+    c.push_str("        int[] ss = new int[512], vs = new int[512]; int sp = 0;\n");
+    c.push_str("        ss[0] = 0; vs[0] = 0;\n");
+    c.push_str("        int tok = yylex(), yyval;\n");
+    c.push_str("        while (true) {\n");
+    c.push_str("            int a = ACT[ss[sp]][tok];\n");
+    c.push_str("            if (a > 0) { sp++; ss[sp] = a-1; vs[sp] = yylval; tok = yylex(); }\n");
+    c.push_str("            else if (a == -9999) { return vs[sp]; }\n");
+    c.push_str("            else if (a < 0) {\n");
+    c.push_str("                int r = -(a+1), len = RLEN[r];\n");
+    c.push_str("                yyval = (len > 0) ? vs[sp-len+1] : 0;\n");
+
+    // Semantic actions
+    c.push_str("                switch(r) {\n");
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if let Some(action) = &rule.action {
+            let sub = substitute_vars_java_minimal(action, rule.rhs.len());
+            let trimmed = sub.trim();
+            if !trimmed.is_empty() {
+                c.push_str(&format!("                    case {}: {} break;\n", i, trimmed));
+            }
+        }
+    }
+    c.push_str("                }\n");
+
+    c.push_str("                sp -= len;\n");
+    c.push_str("                int g = GT[ss[sp]][RLHS[r]];\n");
+    c.push_str("                sp++; ss[sp] = g; vs[sp] = yyval;\n");
+    c.push_str("            } else {\n");
+    c.push_str("                System.out.println(\"Syntax error at token \" + tok);\n");
+    c.push_str("                return -1;\n");
+    c.push_str("            }\n");
+    c.push_str("        }\n    }\n\n");
+
+    // Main
+    c.push_str("    public static void main(String[] args) {\n");
+    c.push_str("        String expr = (args.length > 0) ? args[0] : \"3 + 4 * 2\";\n");
+    c.push_str("        System.out.println(\"Input: \\\"\" + expr + \"\\\"\");\n");
+    c.push_str("        System.out.println(\"Result: \" + parse(expr));\n");
+    c.push_str("    }\n}\n");
+
+    Ok(c)
+}
+
+fn generate_python_minimal(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
+    let (term_ids, nt_ids, num_states) = build_symbol_ids(table, grammar);
+    let num_terms = term_ids.len();
+    let num_nts = nt_ids.len();
+    let _num_rules = grammar.rules.len();
+
+    let mut c = String::new();
+    c.push_str("# Parser generated by OpenLexer\n\n");
+
+    // Token IDs
+    c.push_str("T_EOF = 0\n");
+    for (tok, &id) in &term_ids {
+        if tok != "$" {
+            c.push_str(&format!("T_{} = {}\n", tok.to_uppercase(), id));
+        }
+    }
+    c.push_str("\n");
+
+    // Action table
+    c.push_str("ACT = [\n");
+    for s in 0..num_states {
+        c.push_str("    [");
+        for t in 0..num_terms {
+            let val = if let Some(actions) = table.action.get(&s) {
+                let term_name = term_ids.iter().find(|(_, &v)| v == t).map(|(k, _)| k.as_str()).unwrap_or("");
+                match actions.get(term_name) {
+                    Some(Action::Shift(n)) => *n as i32 + 1,
+                    Some(Action::Reduce(n)) => -(*n as i32) - 1,
+                    Some(Action::Accept) => -9999,
+                    None => 0,
+                }
+            } else { 0 };
+            if t > 0 { c.push(','); }
+            c.push_str(&format!("{}", val));
+        }
+        c.push_str("],\n");
+    }
+    c.push_str("]\n\n");
+
+    // Goto table
+    c.push_str("GT = [\n");
+    for s in 0..num_states {
+        c.push_str("    [");
+        for nt in 0..num_nts {
+            let val = if let Some(gotos) = table.goto.get(&s) {
+                let nt_name = nt_ids.iter().find(|(_, &v)| v == nt).map(|(k, _)| k.as_str()).unwrap_or("");
+                match gotos.get(nt_name) { Some(&n) => n as i32, None => -1 }
+            } else { -1 };
+            if nt > 0 { c.push(','); }
+            c.push_str(&format!("{}", val));
+        }
+        c.push_str("],\n");
+    }
+    c.push_str("]\n\n");
+
+    // Rule LHS and length
+    c.push_str("RLHS = [");
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if i > 0 { c.push(','); }
+        c.push_str(&format!("{}", nt_ids.get(&rule.lhs).unwrap_or(&0)));
+    }
+    c.push_str("]\n");
+    c.push_str("RLEN = [");
+    for (i, rule) in grammar.rules.iter().enumerate() {
+        if i > 0 { c.push(','); }
+        c.push_str(&format!("{}", rule.rhs.len()));
+    }
+    c.push_str("]\n\n");
+
+    // Tokenizer
+    let number_tid = term_ids.get("NUMBER").or_else(|| term_ids.get("number")).or_else(|| term_ids.get("NUM"));
+    c.push_str("class Lexer:\n");
+    c.push_str("    def __init__(self, src): self.src, self.pos, self.yylval = src, 0, 0\n");
+    c.push_str("    def lex(self):\n");
+    c.push_str("        while self.pos < len(self.src) and self.src[self.pos] in ' \\t\\n': self.pos += 1\n");
+    c.push_str("        if self.pos >= len(self.src): return T_EOF\n");
+    c.push_str("        if self.src[self.pos].isdigit():\n");
+    c.push_str("            self.yylval = 0\n");
+    c.push_str("            while self.pos < len(self.src) and self.src[self.pos].isdigit():\n");
+    c.push_str("                self.yylval = self.yylval * 10 + int(self.src[self.pos]); self.pos += 1\n");
+    if let Some(&tid) = number_tid {
+        c.push_str(&format!("            return {}\n", tid));
+    } else {
+        c.push_str("            return -1\n");
+    }
+    c.push_str("        self.yylval = 0; ch = self.src[self.pos]; self.pos += 1\n");
+    for (tok, &id) in &term_ids {
+        if tok.len() == 1 && tok != "$" {
+            c.push_str(&format!("        if ch == '{}': return {}\n", tok, id));
+        } else if tok.len() > 1 && tok != "$" {
+            match tok.to_uppercase().as_str() {
+                "PLUS" => c.push_str(&format!("        if ch == '+': return {}\n", id)),
+                "MINUS" | "SUB" => c.push_str(&format!("        if ch == '-': return {}\n", id)),
+                "TIMES" | "MUL" | "STAR" | "MULTIPLY" => c.push_str(&format!("        if ch == '*': return {}\n", id)),
+                "DIVIDE" | "DIV" | "SLASH" => c.push_str(&format!("        if ch == '/': return {}\n", id)),
+                "LPAREN" | "LPAR" => c.push_str(&format!("        if ch == '(': return {}\n", id)),
+                "RPAREN" | "RPAR" => c.push_str(&format!("        if ch == ')': return {}\n", id)),
+                "EQUALS" | "EQ" | "ASSIGN" => c.push_str(&format!("        if ch == '=': return {}\n", id)),
+                "SEMICOLON" | "SEMI" => c.push_str(&format!("        if ch == ';': return {}\n", id)),
+                "COMMA" => c.push_str(&format!("        if ch == ',': return {}\n", id)),
+                "MOD" | "MODULO" | "PERCENT" => c.push_str(&format!("        if ch == '%%': return {}\n", id)),
+                "POW" | "POWER" | "CARET" => c.push_str(&format!("        if ch == '^': return {}\n", id)),
+                _ => {}
+            }
+        }
+    }
+    c.push_str("        return T_EOF\n\n");
+
+    // Parse function
+    c.push_str("def parse(src):\n");
+    c.push_str("    lex = Lexer(src); ss, vs, sp = [0]*512, [0]*512, 0\n");
+    c.push_str("    tok = lex.lex()\n");
+    c.push_str("    while True:\n");
+    c.push_str("        a = ACT[ss[sp]][tok]\n");
+    c.push_str("        if a > 0: sp += 1; ss[sp] = a-1; vs[sp] = lex.yylval; tok = lex.lex()\n");
+    c.push_str("        elif a == -9999: return vs[sp]\n");
+    c.push_str("        elif a < 0:\n");
+    c.push_str("            r = -(a+1); ln = RLEN[r]\n");
+    c.push_str("            yyval = vs[sp-ln+1] if ln > 0 else 0\n");
+
+    // Semantic actions
+    let has_actions = grammar.rules.iter().any(|r| r.action.is_some());
+    if has_actions {
+        let mut first = true;
+        for (i, rule) in grammar.rules.iter().enumerate() {
+            if let Some(action) = &rule.action {
+                let sub = substitute_vars_python_minimal(action, rule.rhs.len());
+                let trimmed = sub.trim();
+                if !trimmed.is_empty() {
+                    if first {
+                        c.push_str(&format!("            if r == {}: {}\n", i, trimmed));
+                        first = false;
+                    } else {
+                        c.push_str(&format!("            elif r == {}: {}\n", i, trimmed));
+                    }
+                }
+            }
+        }
+    }
+
+    c.push_str("            sp -= ln; g = GT[ss[sp]][RLHS[r]]\n");
+    c.push_str("            sp += 1; ss[sp] = g; vs[sp] = yyval\n");
+    c.push_str("        else: print(f'Syntax error at token {tok}'); return -1\n\n");
+
+    // Test
+    c.push_str("if __name__ == '__main__':\n");
+    c.push_str("    import sys\n");
+    c.push_str("    expr = sys.argv[1] if len(sys.argv) > 1 else '3 + 4 * 2'\n");
+    c.push_str("    print(f'Input: \"{expr}\"')\n");
+    c.push_str("    print(f'Result: {parse(expr)}')\n");
+
+    Ok(c)
+}
 
 pub fn generate_parser(
     table: &ParsingTable,
     grammar: &Grammar,
     lang: TargetLanguage,
 ) -> Result<String> {
+    if !grammar_needs_advanced(grammar) {
+        return match lang {
+            TargetLanguage::C => generate_c_minimal(table, grammar),
+            TargetLanguage::Java => generate_java_minimal(table, grammar),
+            TargetLanguage::Python => generate_python_minimal(table, grammar),
+        };
+    }
     match lang {
         TargetLanguage::C => generate_c(table, grammar),
         TargetLanguage::Java => generate_java(table, grammar),

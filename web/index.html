@@ -1,24 +1,27 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenLexer - Lexer & Parser Generator</title>
-    <link data-trunk rel="rust" data-bin="openlexer-gui" data-cargo-features="gui" href="../Cargo.toml" />
+    <link data-trunk rel="rust" data-bin="openlexer-gui" data-cargo-features="gui" data-preload="false"
+        href="../Cargo.toml" />
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        
-        html, body {
+
+        html,
+        body {
             width: 100%;
             height: 100%;
             overflow: hidden;
             background: #1a1a2e;
         }
-        
+
         #loading {
             position: fixed;
             top: 0;
@@ -34,18 +37,18 @@
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             z-index: 1000;
         }
-        
+
         #loading h1 {
             font-size: 2.5rem;
             margin-bottom: 1rem;
             color: #00d4ff;
         }
-        
+
         #loading p {
             font-size: 1.2rem;
             color: #888;
         }
-        
+
         .spinner {
             width: 50px;
             height: 50px;
@@ -55,12 +58,17 @@
             animation: spin 1s linear infinite;
             margin-top: 2rem;
         }
-        
+
         @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
         }
-        
+
         #openlexer_canvas {
             position: absolute;
             top: 0;
@@ -68,15 +76,248 @@
             width: 100%;
             height: 100%;
         }
-        
+
         .hidden {
             display: none !important;
         }
     </style>
+
+    <!-- Service Worker Cleanup & Iframe Patcher -->
+    <script>
+        // 1. Force Unregister all Service Workers (Cleanup legacy COI worker)
+        if (navigator.serviceWorker) {
+            navigator.serviceWorker.getRegistrations().then(function (registrations) {
+                for (let registration of registrations) {
+                    console.log("[Cleanup] Unregistering Service Worker:", registration);
+                    registration.unregister();
+                }
+            });
+        }
+
+        // 2. Aggressive Iframe Patcher (Proxy document.createElement)
+        // The MutationObserver was too slow (race condition). 
+        // We intercept the creation of the iframe element itself.
+        const originalCreateElement = document.createElement;
+        document.createElement = function (tagName, options) {
+            const element = originalCreateElement.call(document, tagName, options);
+            if (tagName.toLowerCase() === 'iframe') {
+                console.log("[Security] Intercepted iframe creation - forcing 'credentialless'");
+                element.setAttribute('credentialless', '');
+            }
+            return element;
+        };
+    </script>
+
+    <!-- Code Execution: Piston API (Server-side) -->
+
+    <script>
+        // ====================================================================
+        // Code Execution Runtimes
+        // ====================================================================
+
+        // --- Shared State ---
+        let _runResults = {};
+        let _runCounter = 0;
+
+        function startCodeRun(language, code, testInput) {
+            const id = ++_runCounter;
+            _runResults[id] = { done: false, output: '' };
+
+            // Execute async to not block UI
+            (async () => {
+                try {
+                    let result = "";
+                    if (language === 'python') {
+                        result = await runPython(code, testInput);
+                    } else if (language === 'c') {
+                        result = await runC(code, testInput);
+                    } else if (language === 'java') {
+                        result = await runJava(code, testInput);
+                    } else {
+                        throw new Error("Unknown language: " + language);
+                    }
+                    _runResults[id] = { done: true, output: result };
+                } catch (e) {
+                    console.error(e);
+                    _runResults[id] = { done: true, output: '[Error] ' + e.message };
+                }
+            })();
+
+            return id;
+        }
+
+        function isRunDone(id) {
+            return _runResults[id] ? _runResults[id].done : true;
+        }
+
+        function getRunResult(id) {
+            const r = _runResults[id];
+            if (r) { const output = r.output; delete _runResults[id]; return output; }
+            return '';
+        }
+
+        // --- Global Runtime Promises ---
+        // (None needed for Piston)
+
+        // --- Python (via Piston API) ---
+        async function runPython(code, testInput) {
+            const PISTON_API = "https://emkc.org/api/v2/piston/execute";
+
+            try {
+                console.log("[Status] Sending Python code to Piston API...");
+
+                const response = await fetch(PISTON_API, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        language: "python",
+                        version: "3.10.0",
+                        files: [
+                            {
+                                name: "main.py",
+                                content: code
+                            }
+                        ],
+                        stdin: testInput || "",
+                        args: [],
+                        compile_timeout: 10000,
+                        run_timeout: 3000,
+                        memory_limit: 128 * 1024 * 1024,
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Piston API Error: ${response.status} ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                let output = "";
+
+                if (result.run) {
+                    if (result.run.code !== 0) {
+                        output += `[Runtime Error (Exit Code: ${result.run.code})]\n`;
+                        output += result.run.stderr + "\n";
+                    }
+                    output += result.run.stdout;
+                }
+                return output;
+            } catch (e) {
+                return `Execution Error: ${e.message}\n(Check internet connection)`;
+            }
+        }
+
+        // --- C (via Piston API) ---
+        async function runC(code, testInput) {
+            const PISTON_API = "https://emkc.org/api/v2/piston/execute";
+
+            try {
+                console.log("[Status] Sending C code to Piston API...");
+
+                const response = await fetch(PISTON_API, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        language: "c",
+                        version: "10.2.0",
+                        files: [
+                            {
+                                name: "main.c",
+                                content: code
+                            }
+                        ],
+                        stdin: testInput || "",
+                        args: [],
+                        compile_timeout: 10000,
+                        run_timeout: 3000,
+                        memory_limit: 128 * 1024 * 1024,
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Piston API Error: ${response.status} ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                let output = "";
+
+                if (result.compile && result.compile.code !== 0) {
+                    output += "[Compilation Error]\n";
+                    output += result.compile.stdout + "\n";
+                    output += result.compile.stderr + "\n";
+                    return output;
+                }
+
+                if (result.run) {
+                    if (result.run.code !== 0) {
+                        output += `[Runtime Error (Exit Code: ${result.run.code})]\n`;
+                        output += result.run.stderr + "\n";
+                    }
+                    output += result.run.stdout;
+                }
+                return output;
+            } catch (e) {
+                return `Execution Error: ${e.message}\n(Check internet connection)`;
+            }
+        }
+
+        // --- Java (via Piston API) ---
+        async function runJava(code, testInput) {
+            const PISTON_API = "https://emkc.org/api/v2/piston/execute";
+
+            try {
+                console.log("[Status] Sending Java code to Piston API...");
+
+                const response = await fetch(PISTON_API, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        language: "java",
+                        version: "15.0.2",
+                        files: [
+                            {
+                                name: "Lexer.java",
+                                content: code
+                            }
+                        ],
+                        stdin: testInput || "",
+                        args: [],
+                        compile_timeout: 10000,
+                        run_timeout: 3000,
+                        memory_limit: 128 * 1024 * 1024,
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Piston API Error: ${response.status} ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                let output = "";
+
+                if (result.compile && result.compile.code !== 0) {
+                    output += "[Compilation Error]\n";
+                    output += result.compile.stdout + "\n";
+                    output += result.compile.stderr + "\n";
+                    return output;
+                }
+
+                if (result.run) {
+                    if (result.run.code !== 0) {
+                        output += `[Runtime Error (Exit Code: ${result.run.code})]\n`;
+                        output += result.run.stderr + "\n";
+                    }
+                    output += result.run.stdout;
+                }
+                return output;
+            } catch (e) {
+                return `Execution Error: ${e.message}\n(Check internet connection)`;
+            }
+        }
+    </script>
 </head>
+
 <body>
     <canvas id="openlexer_canvas"></canvas>
-    
     <div id="loading">
         <h1>OpenLexer</h1>
         <p>Lexer & Parser Generator</p>
@@ -85,4 +326,5 @@
         <p style="margin-top: 1rem; font-size: 0.8rem;">Loading WebAssembly...</p>
     </div>
 </body>
+
 </html>
