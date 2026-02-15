@@ -655,33 +655,106 @@ impl OpenLexerApp {
         // Auto-prepend generated code based on include mode
         let mut full_code = String::new();
 
+        // For C, define LEXER_NO_MAIN to suppress the default main function
+        // but keep the test() helper available (guarded by LEXER_NO_TEST).
+        if self.language == TargetLanguage::C {
+            full_code.push_str("#define LEXER_NO_MAIN\n");
+        }
+
         let include_lexer = self.try_include == TryInclude::LexerOnly || self.try_include == TryInclude::Both;
         let include_parser = self.try_include == TryInclude::ParserOnly || self.try_include == TryInclude::Both;
 
-        if include_lexer {
-            if self.lexer_output.is_empty() {
-                self.log(LogLevel::Warning, "No generated lexer. Go to Lexer tab and Generate first.");
-                return;
+        if self.language == TargetLanguage::Java {
+            // For Java, we MUST inject user code into the existing main method
+            // because separate classes or top-level code won't run easily in the simple runner.
+            // We expect the generated code to have 'public static void main(String[] args) {'
+            
+            // 1. Combine Lexer and Parser if needed (Java usually just needs Lexer class for basic tests)
+            // But if we have both, we need to be careful. Java requires one public class per file.
+            // Piston runs the file as "Lexer.java". So Lexer class must be public.
+            // If Parser is also generated, it might be in the same file as non-public?
+            // For now, let's assume Lexer mostly.
+            
+            let mut base_code = String::new();
+            if include_lexer { base_code.push_str(&self.lexer_output); }
+            if include_parser { base_code.push_str("\n\n"); base_code.push_str(&self.parser_output); }
+            
+            if let Some(start_idx) = base_code.find("public static void main(String[] args) {") {
+                let after_brace = start_idx + "public static void main(String[] args) {".len();
+                
+                // Find matching closing brace for main
+                let mut brace_count = 1;
+                let mut end_idx = after_brace;
+                for (i, c) in base_code[after_brace..].char_indices() {
+                    match c {
+                        '{' => brace_count += 1,
+                        '}' => brace_count -= 1,
+                        _ => {}
+                    }
+                    if brace_count == 0 {
+                        end_idx = after_brace + i;
+                        break;
+                    }
+                }
+                
+                if brace_count == 0 {
+                    // Replace body of main with user code
+                    full_code.push_str(&base_code[..after_brace]);
+                    full_code.push_str("\n        // User Test Code Injected Here\n");
+                    full_code.push_str(&self.try_code);
+                    full_code.push_str("\n    "); // Indentation before closing brace
+                    full_code.push_str(&base_code[end_idx..]);
+                } else {
+                    // Fallback if parsing fails
+                    full_code.push_str(&base_code);
+                }
+            } else {
+                 full_code.push_str(&base_code);
             }
-            full_code.push_str(&self.lexer_output);
-            full_code.push('\n');
-        }
-
-        if include_parser {
-            if self.parser_output.is_empty() {
-                self.log(LogLevel::Warning, "No generated parser. Go to Parser tab and Generate first.");
-                return;
+        } else {
+            // Standard append logic for Python/C
+            if include_lexer {
+                if self.lexer_output.is_empty() {
+                    self.log(LogLevel::Warning, "No generated lexer. Go to Lexer tab and Generate first.");
+                    return;
+                }
+                full_code.push_str(&self.strip_default_main(&self.lexer_output));
+                full_code.push('\n');
             }
-            full_code.push_str(&self.parser_output);
-            full_code.push('\n');
-        }
 
-        // Append user's test program
-        full_code.push_str(&self.try_code);
+            if include_parser {
+                if self.parser_output.is_empty() {
+                    self.log(LogLevel::Warning, "No generated parser. Go to Parser tab and Generate first.");
+                    return;
+                }
+                full_code.push_str(&self.strip_default_main(&self.parser_output));
+                full_code.push('\n');
+            }
+
+            // Append user's test program
+            full_code.push_str(&self.try_code);
+        }
 
         let total_lines = full_code.lines().count();
         self.log(LogLevel::Info, &format!("Running {} code ({} lines total: generated + your test)", self.language.display_name(), total_lines));
         self.run_generated_code(&full_code);
+    }
+
+    fn strip_default_main<'a>(&self, code: &'a str) -> &'a str {
+        match self.language {
+            TargetLanguage::Python => {
+                if let Some(idx) = code.find("if __name__ == '__main__':") {
+                    &code[..idx]
+                } else {
+                    code
+                }
+            }
+            TargetLanguage::C => {
+                // C now uses #define LEXER_NO_MAIN, so no stripping needed.
+                code
+            }
+            _ => code,
+        }
     }
 
     // ========================================================================
@@ -1534,6 +1607,50 @@ expr:
                 ui.label("  - Building a shared parse forest (SPPF)");
                 ui.add_space(4.0);
                 ui.label("Use GLR mode for grammars with shift/reduce or reduce/reduce conflicts.");
+            });
+
+            ui.add_space(16.0);
+
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Test Drivers (Try Tab)").strong().size(16.0));
+                ui.add_space(4.0);
+                ui.label("The generated code includes a 'test(expr)' helper function. You can use it in the Try tab:");
+                ui.add_space(8.0);
+
+                ui.label(egui::RichText::new("Python").strong());
+                ui.code(
+                    r#"# Standard usage
+test("3 + 4 * 5")
+
+# Manual usage
+lex = Lexer("10 / 2")
+for token in lex.tokenize():
+    print(token)"#
+                );
+
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("C").strong());
+                ui.code(
+                    r#"// Define your own main
+int main() {
+    test("3 + 4 * 5");
+    return 0;
+}"#
+                );
+
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("Java").strong());
+                ui.code(
+                    r#"// Code is injected into the main() method
+test("3 + 4 * 5");
+
+// Or manual usage
+Lexer l = new Lexer("10 / 2");
+Token t;
+while ((t = l.next()).type != TokenType.EOF) {
+    System.out.println(t.type);
+}"#
+                );
             });
 
             ui.add_space(16.0);

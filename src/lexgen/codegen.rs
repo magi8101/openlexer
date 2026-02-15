@@ -177,7 +177,7 @@ fn generate_c_minimal(dfa: &crate::lexgen::dfa::Dfa, spec: &LexerSpec) -> Result
     c.push_str("}\n\n");
 
     // Test driver
-    c.push_str("#ifndef LEXER_NO_MAIN\n");
+    c.push_str("#ifndef LEXER_NO_TEST\n");
     c.push_str("void test(const char input[]) {\n");
     c.push_str("    int i;\n");
     c.push_str("    printf(\"Input: \\\"%s\\\"\\n\", input);\n");
@@ -193,6 +193,8 @@ fn generate_c_minimal(dfa: &crate::lexgen::dfa::Dfa, spec: &LexerSpec) -> Result
     c.push_str("        printf(\"\\\"\\n\");\n");
     c.push_str("    } while(tok_type != TOKEN_EOF);\n");
     c.push_str("}\n");
+    c.push_str("#endif\n\n");
+    c.push_str("#ifndef LEXER_NO_MAIN\n");
     c.push_str("int main() {\n");
     c.push_str("    test(\"3 + 4 * 2\");\n");
     c.push_str("    return 0;\n");
@@ -2395,7 +2397,7 @@ pub fn generate_python_test_driver() -> String {
 /// Generates a standalone C test driver.
 pub fn generate_c_test_driver() -> String {
     let mut code = String::new();
-    code.push_str("#ifndef LEXER_NO_MAIN\n");
+    code.push_str("#ifndef LEXER_NO_TEST\n");
     code.push_str("/* === Built-in Test Driver === */\n\n");
     code.push_str("static void test(const char* expr) {\n");
     code.push_str("    printf(\"Input: \\\"%s\\\"\\n\", expr);\n");
@@ -2409,7 +2411,9 @@ pub fn generate_c_test_driver() -> String {
     code.push_str("        printf(\"\\\"\\n\");\n");
     code.push_str("    } while (token.type != TOKEN_EOF);\n");
     code.push_str("    printf(\"\\n\");\n");
-    code.push_str("}\n\n");
+    code.push_str("}\n");
+    code.push_str("#endif\n\n");
+    code.push_str("#ifndef LEXER_NO_MAIN\n");
     code.push_str("int main(int argc, char** argv) {\n");
     code.push_str("    if (argc > 1) {\n");
     code.push_str("        for (int i = 1; i < argc; i++) {\n");
