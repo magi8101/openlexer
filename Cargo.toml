@@ -1,6 +1,6 @@
 [package]
 name = "openlexer"
-version = "0.1.4"
+version = "1.0.0"
 edition = "2021"
 description = "Flex/Bison replacement - Lexer and Parser generator for C, Java, Python"
 license = "MIT"
