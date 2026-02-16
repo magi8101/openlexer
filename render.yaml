@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: openlexer-backend
+    env: docker
+    region: oregon
+    plan: free
+    dockerContext: .
+    dockerfilePath: Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 10000 
+envVarGroups: []

@@ -159,14 +159,18 @@
         // --- Global Runtime Promises ---
         // (None needed for Piston)
 
-        // --- Python (via Piston API) ---
+        // Configuration: Automatically switch between Local and Production backend.
+        const IS_LOCAL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+        const BACKEND_URL = IS_LOCAL
+            ? "http://localhost:8000/execute"
+            : "https://YOUR-RENDER-APP-NAME.onrender.com/execute"; // <--- CHANGE THIS TO YOUR RENDER URL
+
+        // --- Python (via Backend Proxy) ---
         async function runPython(code, testInput) {
-            const PISTON_API = "https://emkc.org/api/v2/piston/execute";
-
             try {
-                console.log("[Status] Sending Python code to Piston API...");
+                console.log("[Status] Sending Python code to Backend Proxy...");
 
-                const response = await fetch(PISTON_API, {
+                const response = await fetch(BACKEND_URL, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -206,14 +210,12 @@
             }
         }
 
-        // --- C (via Piston API) ---
+        // --- C (via Backend Proxy) ---
         async function runC(code, testInput) {
-            const PISTON_API = "https://emkc.org/api/v2/piston/execute";
-
             try {
-                console.log("[Status] Sending C code to Piston API...");
+                console.log("[Status] Sending C code to Backend Proxy...");
 
-                const response = await fetch(PISTON_API, {
+                const response = await fetch(BACKEND_URL, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -260,14 +262,12 @@
             }
         }
 
-        // --- Java (via Piston API) ---
+        // --- Java (via Backend Proxy) ---
         async function runJava(code, testInput) {
-            const PISTON_API = "https://emkc.org/api/v2/piston/execute";
-
             try {
-                console.log("[Status] Sending Java code to Piston API...");
+                console.log("[Status] Sending Java code to Backend Proxy...");
 
-                const response = await fetch(PISTON_API, {
+                const response = await fetch(BACKEND_URL, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({

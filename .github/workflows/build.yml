@@ -37,9 +37,17 @@ jobs:
         with:
           version: 'latest'
       
+      - name: Inject Backend URL
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          if [ -n "$BACKEND_URL" ]; then
+            sed -i "s|https://YOUR-RENDER-APP-NAME.onrender.com/execute|$BACKEND_URL|g" web/index.html
+          fi
+
       - name: Build WASM
         run: trunk build --release --public-url /openlexer/ web/index.html
-      
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
