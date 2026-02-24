@@ -340,7 +340,19 @@ fn generate_c_minimal(table: &ParsingTable, grammar: &Grammar) -> Result<String>
     // Test driver
     c.push_str("#ifndef PARSER_NO_MAIN\n");
     c.push_str("int main(int argc, char **argv) {\n");
-    c.push_str("    const char *expr = (argc > 1) ? argv[1] : \"3 + 4 * 2\";\n");
+    c.push_str("    char buffer[1024];\n");
+    c.push_str("    const char *expr;\n");
+    c.push_str("    if (argc > 1) {\n");
+    c.push_str("        expr = argv[1];\n");
+    c.push_str("    } else {\n");
+    c.push_str("        if (fgets(buffer, sizeof(buffer), stdin)) {\n");
+    c.push_str("            size_t len = strlen(buffer);\n");
+    c.push_str("            if (len > 0 && buffer[len-1] == '\\n') buffer[len-1] = '\\0';\n");
+    c.push_str("            expr = buffer;\n");
+    c.push_str("        } else {\n");
+    c.push_str("            expr = \"3 + 4 * 2\";\n");
+    c.push_str("        }\n");
+    c.push_str("    }\n");
     c.push_str("    printf(\"Input: \\\"%s\\\"\\n\", expr);\n");
     c.push_str("    int result = yyparse(expr);\n");
     c.push_str("    printf(\"Result: %d\\n\", result);\n");
@@ -499,7 +511,14 @@ fn generate_java_minimal(table: &ParsingTable, grammar: &Grammar) -> Result<Stri
 
     // Main
     c.push_str("    public static void main(String[] args) {\n");
-    c.push_str("        String expr = (args.length > 0) ? args[0] : \"3 + 4 * 2\";\n");
+    c.push_str("        String expr = \"3 + 4 * 2\";\n");
+    c.push_str("        if (args.length > 0) {\n");
+    c.push_str("            expr = args[0];\n");
+    c.push_str("        } else {\n");
+    c.push_str("            try (java.util.Scanner sc = new java.util.Scanner(System.in)) {\n");
+    c.push_str("                if (sc.hasNextLine()) expr = sc.nextLine();\n");
+    c.push_str("            } catch (Exception e) {}\n");
+    c.push_str("        }\n");
     c.push_str("        System.out.println(\"Input: \\\"\" + expr + \"\\\"\");\n");
     c.push_str("        System.out.println(\"Result: \" + parse(expr));\n");
     c.push_str("    }\n}\n");
@@ -654,7 +673,11 @@ fn generate_python_minimal(table: &ParsingTable, grammar: &Grammar) -> Result<St
     // Test
     c.push_str("if __name__ == '__main__':\n");
     c.push_str("    import sys\n");
-    c.push_str("    expr = sys.argv[1] if len(sys.argv) > 1 else '3 + 4 * 2'\n");
+    c.push_str("    if len(sys.argv) > 1:\n");
+    c.push_str("        expr = sys.argv[1]\n");
+    c.push_str("    else:\n");
+    c.push_str("        stdin_input = sys.stdin.read().strip()\n");
+    c.push_str("        expr = stdin_input if stdin_input else '3 + 4 * 2'\n");
     c.push_str("    print(f'Input: \"{expr}\"')\n");
     c.push_str("    print(f'Result: {parse(expr)}')\n");
 
