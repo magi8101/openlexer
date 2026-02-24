@@ -655,6 +655,9 @@ impl OpenLexerApp {
         // Auto-prepend generated code based on include mode
         let mut full_code = String::new();
 
+        let include_lexer = self.try_include == TryInclude::LexerOnly || self.try_include == TryInclude::Both;
+        let include_parser = self.try_include == TryInclude::ParserOnly || self.try_include == TryInclude::Both;
+
         // For C, define LEXER_NO_MAIN and PARSER_NO_MAIN to suppress default main functions
         // but keep the test() helpers available.
         if self.language == TargetLanguage::C {
@@ -663,9 +666,6 @@ impl OpenLexerApp {
                 full_code.push_str("#define PARSER_NO_MAIN\n");
             }
         }
-
-        let include_lexer = self.try_include == TryInclude::LexerOnly || self.try_include == TryInclude::Both;
-        let include_parser = self.try_include == TryInclude::ParserOnly || self.try_include == TryInclude::Both;
 
         if self.language == TargetLanguage::Java {
             // For Java, we MUST inject user code into the existing main method
