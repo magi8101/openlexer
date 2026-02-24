@@ -183,7 +183,7 @@
                             }
                         ],
                         stdin: testInput || "",
-                        args: [],
+                        args: testInput ? [testInput] : [],
                         compile_timeout: 10000,
                         run_timeout: 3000,
                         memory_limit: 128 * 1024 * 1024,
@@ -228,7 +228,7 @@
                             }
                         ],
                         stdin: testInput || "",
-                        args: [],
+                        args: testInput ? [testInput] : [],
                         compile_timeout: 10000,
                         run_timeout: 3000,
                         memory_limit: 128 * 1024 * 1024,
@@ -280,7 +280,7 @@
                             }
                         ],
                         stdin: testInput || "",
-                        args: [],
+                        args: testInput ? [testInput] : [],
                         compile_timeout: 10000,
                         run_timeout: 3000,
                         memory_limit: 128 * 1024 * 1024,

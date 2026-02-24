@@ -655,10 +655,13 @@ impl OpenLexerApp {
         // Auto-prepend generated code based on include mode
         let mut full_code = String::new();
 
-        // For C, define LEXER_NO_MAIN to suppress the default main function
-        // but keep the test() helper available (guarded by LEXER_NO_TEST).
+        // For C, define LEXER_NO_MAIN and PARSER_NO_MAIN to suppress default main functions
+        // but keep the test() helpers available.
         if self.language == TargetLanguage::C {
             full_code.push_str("#define LEXER_NO_MAIN\n");
+            if include_parser {
+                full_code.push_str("#define PARSER_NO_MAIN\n");
+            }
         }
 
         let include_lexer = self.try_include == TryInclude::LexerOnly || self.try_include == TryInclude::Both;
@@ -677,7 +680,13 @@ impl OpenLexerApp {
             
             let mut base_code = String::new();
             if include_lexer { base_code.push_str(&self.lexer_output); }
-            if include_parser { base_code.push_str("\n\n"); base_code.push_str(&self.parser_output); }
+            if include_parser {
+                // Make Parser class non-public to avoid "one public class per file" error
+                // Piston runs the file as Lexer.java, so Lexer must remain public
+                let parser_code = self.parser_output.replace("public class Parser", "class Parser");
+                base_code.push_str("\n\n");
+                base_code.push_str(&parser_code);
+            }
             
             if let Some(start_idx) = base_code.find("public static void main(String[] args) {") {
                 let after_brace = start_idx + "public static void main(String[] args) {".len();
@@ -740,20 +749,25 @@ impl OpenLexerApp {
         self.run_generated_code(&full_code);
     }
 
-    fn strip_default_main<'a>(&self, code: &'a str) -> &'a str {
+    fn strip_default_main(&self, code: &str) -> String {
         match self.language {
             TargetLanguage::Python => {
-                if let Some(idx) = code.find("if __name__ == '__main__':") {
+                // Strip if __name__ == '__main__': block
+                let code = if let Some(idx) = code.find("if __name__ == '__main__':") {
                     &code[..idx]
                 } else {
                     code
-                }
-            }
-            TargetLanguage::C => {
-                // C now uses #define LEXER_NO_MAIN, so no stripping needed.
+                };
+                // Also strip parse_expression and test_parse functions that contain
+                // 'from lexer import Lexer' — these fail in combined single-file execution
+                let code = if let Some(idx) = code.find("def parse_expression(") {
+                    code[..idx].to_string()
+                } else {
+                    code.to_string()
+                };
                 code
             }
-            _ => code,
+            _ => code.to_string(),
         }
     }
 

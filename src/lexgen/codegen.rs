@@ -195,8 +195,20 @@ fn generate_c_minimal(dfa: &crate::lexgen::dfa::Dfa, spec: &LexerSpec) -> Result
     c.push_str("}\n");
     c.push_str("#endif\n\n");
     c.push_str("#ifndef LEXER_NO_MAIN\n");
-    c.push_str("int main() {\n");
-    c.push_str("    test(\"3 + 4 * 2\");\n");
+    c.push_str("int main(int argc, char** argv) {\n");
+    c.push_str("    if (argc > 1) {\n");
+    c.push_str("        int i;\n");
+    c.push_str("        for (i = 1; i < argc; i++) test(argv[i]);\n");
+    c.push_str("    } else {\n");
+    c.push_str("        char line[4096];\n");
+    c.push_str("        if (fgets(line, sizeof(line), stdin)) {\n");
+    c.push_str("            int len = strlen(line);\n");
+    c.push_str("            if (len > 0 && line[len-1] == '\\n') line[len-1] = 0;\n");
+    c.push_str("            test(line);\n");
+    c.push_str("        } else {\n");
+    c.push_str("            test(\"3 + 4 * 2\");\n");
+    c.push_str("        }\n");
+    c.push_str("    }\n");
     c.push_str("    return 0;\n");
     c.push_str("}\n");
     c.push_str("#endif\n");
@@ -317,7 +329,12 @@ fn generate_python_minimal(dfa: &crate::lexgen::dfa::Dfa, spec: &LexerSpec) -> R
     c.push_str("    import sys\n");
     c.push_str("    if len(sys.argv) > 1:\n");
     c.push_str("        for arg in sys.argv[1:]: test(arg)\n");
-    c.push_str("    else: test('3 + 4 * 2'); test('(10 - 2) / 4')\n");
+    c.push_str("    else:\n");
+    c.push_str("        import sys as _sys\n");
+    c.push_str("        _input = _sys.stdin.read().strip()\n");
+    c.push_str("        if _input:\n");
+    c.push_str("            for line in _input.splitlines(): test(line)\n");
+    c.push_str("        else: test('3 + 4 * 2'); test('(10 - 2) / 4')\n");
 
     Ok(c)
 }
@@ -442,7 +459,17 @@ fn generate_java_minimal(dfa: &crate::lexgen::dfa::Dfa, spec: &LexerSpec) -> Res
 
     // Main
     c.push_str("    public static void main(String[] args) {\n");
-    c.push_str("        String[] inputs = args.length > 0 ? args : new String[]{\"3 + 4 * 2\", \"(10 - 2) / 4\"};\n");
+    c.push_str("        String[] inputs;\n");
+    c.push_str("        if (args.length > 0) {\n");
+    c.push_str("            inputs = args;\n");
+    c.push_str("        } else {\n");
+    c.push_str("            try {\n");
+    c.push_str("                java.util.Scanner sc = new java.util.Scanner(System.in);\n");
+    c.push_str("                java.util.List<String> lines = new java.util.ArrayList<>();\n");
+    c.push_str("                while (sc.hasNextLine()) { String l = sc.nextLine().trim(); if (!l.isEmpty()) lines.add(l); }\n");
+    c.push_str("                inputs = lines.isEmpty() ? new String[]{\"3 + 4 * 2\"} : lines.toArray(new String[0]);\n");
+    c.push_str("            } catch (Exception e) { inputs = new String[]{\"3 + 4 * 2\"}; }\n");
+    c.push_str("        }\n");
     c.push_str("        for (String inp : inputs) {\n");
     c.push_str("            System.out.println(\"Input: \\\"\" + inp + \"\\\"\");\n");
     c.push_str("            Lexer l = new Lexer(inp); int[] t;\n");
@@ -2382,15 +2409,15 @@ pub fn generate_python_test_driver() -> String {
     code.push_str("        for arg in sys.argv[1:]:\n");
     code.push_str("            test(arg)\n");
     code.push_str("    else:\n");
-    code.push_str("        # Default demo expressions\n");
-    code.push_str("        print('=== OpenLexer Test Driver ===')\n");
-    code.push_str("        print('Usage: python lexer.py \"expression1\" \"expression2\" ...')\n");
-    code.push_str("        print('Or:    from lexer import test, test_all')\n");
-    code.push_str("        print()\n");
-    code.push_str("        test('3 + 4 * 2')\n");
-    code.push_str("        test('(10 - 2) / 4')\n");
-    code.push_str("        test('hello world')\n");
-    code.push_str("        test('')\n");
+    code.push_str("        # Try reading from stdin\n");
+    code.push_str("        _input = sys.stdin.read().strip()\n");
+    code.push_str("        if _input:\n");
+    code.push_str("            for line in _input.splitlines():\n");
+    code.push_str("                test(line)\n");
+    code.push_str("        else:\n");
+    code.push_str("            print('=== OpenLexer Test Driver ===')\n");
+    code.push_str("            test('3 + 4 * 2')\n");
+    code.push_str("            test('(10 - 2) / 4')\n");
     code
 }
 
@@ -2420,14 +2447,16 @@ pub fn generate_c_test_driver() -> String {
     code.push_str("            test(argv[i]);\n");
     code.push_str("        }\n");
     code.push_str("    } else {\n");
-    code.push_str("        printf(\"=== OpenLexer Test Driver ===\\n\");\n");
-    code.push_str(
-        "        printf(\"Usage: ./lexer \\\"expression1\\\" \\\"expression2\\\" ...\\n\\n\");\n",
-    );
-    code.push_str("        test(\"3 + 4 * 2\");\n");
-    code.push_str("        test(\"(10 - 2) / 4\");\n");
-    code.push_str("        test(\"hello world\");\n");
-    code.push_str("        test(\"\");\n");
+    code.push_str("        char line[4096];\n");
+    code.push_str("        if (fgets(line, sizeof(line), stdin)) {\n");
+    code.push_str("            int len = strlen(line);\n");
+    code.push_str("            if (len > 0 && line[len-1] == '\\n') line[len-1] = 0;\n");
+    code.push_str("            test(line);\n");
+    code.push_str("        } else {\n");
+    code.push_str("            printf(\"=== OpenLexer Test Driver ===\\n\");\n");
+    code.push_str("            test(\"3 + 4 * 2\");\n");
+    code.push_str("            test(\"(10 - 2) / 4\");\n");
+    code.push_str("        }\n");
     code.push_str("    }\n");
     code.push_str("    return 0;\n");
     code.push_str("}\n");
@@ -2456,13 +2485,19 @@ pub fn generate_java_test_driver() -> String {
     code.push_str("                test(arg);\n");
     code.push_str("            }\n");
     code.push_str("        } else {\n");
-    code.push_str("            System.out.println(\"=== OpenLexer Test Driver ===\");\n");
-    code.push_str("            System.out.println(\"Usage: java Lexer \\\"expression1\\\" \\\"expression2\\\" ...\");\n");
-    code.push_str("            System.out.println();\n");
-    code.push_str("            test(\"3 + 4 * 2\");\n");
-    code.push_str("            test(\"(10 - 2) / 4\");\n");
-    code.push_str("            test(\"hello world\");\n");
-    code.push_str("            test(\"\");\n");
+    code.push_str("            try {\n");
+    code.push_str("                java.util.Scanner sc = new java.util.Scanner(System.in);\n");
+    code.push_str("                boolean hasInput = false;\n");
+    code.push_str("                while (sc.hasNextLine()) {\n");
+    code.push_str("                    String line = sc.nextLine().trim();\n");
+    code.push_str("                    if (!line.isEmpty()) { test(line); hasInput = true; }\n");
+    code.push_str("                }\n");
+    code.push_str("                if (!hasInput) {\n");
+    code.push_str("                    test(\"3 + 4 * 2\");\n");
+    code.push_str("                }\n");
+    code.push_str("            } catch (Exception e) {\n");
+    code.push_str("                test(\"3 + 4 * 2\");\n");
+    code.push_str("            }\n");
     code.push_str("        }\n");
     code.push_str("    }\n");
     code

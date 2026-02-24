@@ -1160,7 +1160,6 @@ fn generate_c_parser_test_driver() -> String {
     code.push_str("extern YYSTYPE yylval;   /* Semantic value from lexer */\n\n");
     code.push_str("int main(int argc, char **argv) {\n");
     code.push_str("    printf(\"=== OpenLexer Parser Test ===\\n\");\n");
-    code.push_str("    printf(\"Calling yyparse()...\\n\");\n");
     code.push_str("    int result = yyparse();\n");
     code.push_str("    if (result == 0) {\n");
     code.push_str("        printf(\"Parse successful!\\n\");\n");
@@ -1662,9 +1661,6 @@ fn generate_java_parser_test_driver() -> String {
     code.push_str("    \n");
     code.push_str("    public static void main(String[] args) {\n");
     code.push_str("        System.out.println(\"=== OpenLexer Parser Test ===\");\n");
-    code.push_str(
-        "        System.out.println(\"Usage: java Parser \\\"expr1\\\" \\\"expr2\\\" ...\");\n",
-    );
     code.push_str("        System.out.println();\n");
     code.push_str("        \n");
     code.push_str("        if (args.length > 0) {\n");
@@ -1672,11 +1668,20 @@ fn generate_java_parser_test_driver() -> String {
     code.push_str("                testParse(arg);\n");
     code.push_str("            }\n");
     code.push_str("        } else {\n");
-    code.push_str("            // Default demo\n");
-    code.push_str("            testParse(\"5\");\n");
-    code.push_str("            testParse(\"3 + 4\");\n");
-    code.push_str("            testParse(\"3 + 4 * 2\");\n");
-    code.push_str("            testParse(\"(3 + 4) * 2\");\n");
+    code.push_str("            try {\n");
+    code.push_str("                java.util.Scanner sc = new java.util.Scanner(System.in);\n");
+    code.push_str("                boolean hasInput = false;\n");
+    code.push_str("                while (sc.hasNextLine()) {\n");
+    code.push_str("                    String line = sc.nextLine().trim();\n");
+    code.push_str("                    if (!line.isEmpty()) { testParse(line); hasInput = true; }\n");
+    code.push_str("                }\n");
+    code.push_str("                if (!hasInput) {\n");
+    code.push_str("                    testParse(\"3 + 4\");\n");
+    code.push_str("                    testParse(\"3 + 4 * 2\");\n");
+    code.push_str("                }\n");
+    code.push_str("            } catch (Exception e) {\n");
+    code.push_str("                testParse(\"3 + 4 * 2\");\n");
+    code.push_str("            }\n");
     code.push_str("        }\n");
     code.push_str("    }\n");
     code
@@ -1927,18 +1932,19 @@ pub fn generate_python_parser_test_driver() -> String {
     code.push_str("if __name__ == '__main__':\n");
     code.push_str("    import sys\n");
     code.push_str("    print('=== OpenLexer Parser Test Driver ===')\n");
-    code.push_str("    print('Usage: python parser.py \"expression1\" \"expression2\" ...')\n");
     code.push_str("    print()\n");
     code.push_str("    \n");
     code.push_str("    if len(sys.argv) > 1:\n");
     code.push_str("        for arg in sys.argv[1:]:\n");
     code.push_str("            test_parse(arg)\n");
     code.push_str("    else:\n");
-    code.push_str("        # Default demo\n");
-    code.push_str("        test_parse('5')\n");
-    code.push_str("        test_parse('3 + 4')\n");
-    code.push_str("        test_parse('3 + 4 * 2')\n");
-    code.push_str("        test_parse('(3 + 4) * 2')\n");
+    code.push_str("        _input = sys.stdin.read().strip()\n");
+    code.push_str("        if _input:\n");
+    code.push_str("            for line in _input.splitlines():\n");
+    code.push_str("                test_parse(line)\n");
+    code.push_str("        else:\n");
+    code.push_str("            test_parse('3 + 4')\n");
+    code.push_str("            test_parse('3 + 4 * 2')\n");
     code
 }
 
