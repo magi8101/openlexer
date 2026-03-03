@@ -668,21 +668,17 @@ impl OpenLexerApp {
         }
 
         if self.language == TargetLanguage::Java {
-            // For Java, we MUST inject user code into the existing main method
-            // because separate classes or top-level code won't run easily in the simple runner.
-            // We expect the generated code to have 'public static void main(String[] args) {'
-            
-            // 1. Combine Lexer and Parser if needed (Java usually just needs Lexer class for basic tests)
-            // But if we have both, we need to be careful. Java requires one public class per file.
-            // Piston runs the file as "Lexer.java". So Lexer class must be public.
-            // If Parser is also generated, it might be in the same file as non-public?
-            // For now, let's assume Lexer mostly.
+            // For Java, we MUST handle the "one public class per file" rule
+            // Java requires exactly ONE public class per .java file, and the filename must match.
+            // 
+            // Strategy: Make Parser class non-public so Lexer.java can contain both
+            // This file would be saved as "Lexer.java" (matching the public class name)
             
             let mut base_code = String::new();
             if include_lexer { base_code.push_str(&self.lexer_output); }
             if include_parser {
-                // Make Parser class non-public to avoid "one public class per file" error
-                // Piston runs the file as Lexer.java, so Lexer must remain public
+                // Make Parser class non-public to avoid Java compilation error
+                // Change "public class Parser" to "class Parser"
                 let parser_code = self.parser_output.replace("public class Parser", "class Parser");
                 base_code.push_str("\n\n");
                 base_code.push_str(&parser_code);

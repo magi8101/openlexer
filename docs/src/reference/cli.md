@@ -28,7 +28,15 @@ openlexer gen-lexer --lexer <file.l> --lang <language> --output <dir>
 
 ```bash
 openlexer gen-lexer --lexer calc.l --lang python --output ./build
+
+# Java: Generate Lexer.java  
+openlexer gen-lexer -l calc.l -L java -o ./build
+
+# C: Generate without test driver
+openlexer gen-lexer -l calc.l -L c -o ./build --no-test
 ```
+
+**Generated Files:** `lexer.c` (C), `Lexer.java` (Java), `lexer.py` (Python)
 
 ### gen-parser
 
@@ -50,7 +58,15 @@ openlexer gen-parser --parser <file.y> --lang <language> --output <dir>
 
 ```bash
 openlexer gen-parser --parser calc.y --lang c --output ./build
+
+# Java: Compile lexer and parser together (Parser auto-detects Lexer.class)
+openlexer gen-lexer -l calc.l -L java -o ./build
+openlexer gen-parser --parser calc.y -L java -o ./build
+javac ./build/Lexer.java ./build/Parser.java
+java -cp ./build Parser "3 + 4 * 2"
 ```
+
+**Generated Files:** `parser.c` (C), `Parser.java` (Java), `parser.py` (Python)
 
 ### help
 

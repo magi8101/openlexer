@@ -90,7 +90,69 @@ factor: NUMBER
 
 **The token names must match exactly!**
 
-## Integration Code Examples
+## Language-Specific Integration
+
+### Java Integration
+
+**File Organization**: Java requires one public class per file.
+
+```bash
+# Generate both
+openlexer gen-lexer --lexer calc.l -L java -o src/
+openlexer gen-parser --parser calc.y -L java -o src/
+
+# This creates:
+#   src/Lexer.java  - public class Lexer
+#   src/Parser.java - public class Parser
+```
+
+**Compilation:**
+
+```bash
+# Compile both (Parser auto-detects Lexer)
+javac src/Lexer.java src/Parser.java
+
+# Run parser
+java -cp src Parser "3 + 4 * 2"
+# Output: [Using external Lexer.class]
+#         Input: "3 + 4 * 2"
+#         Result: 11
+```
+
+**Custom Integration:**
+
+```java
+import java.util.*;
+
+public class Calculator {
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+        
+        while (true) {
+            System.out.print("calc> ");
+            String line = sc.nextLine();
+            if (line.equals("quit")) break;
+            
+            try {
+                // Tokenize
+                Lexer lex = new Lexer(line);
+                System.out.print("Tokens: ");
+                Lexer.Token tok;
+                while ((tok = lex.nextToken()).type != Lexer.TOKEN_EOF) {
+                    System.out.print(tok.text + " ");
+                }
+                System.out.println();
+                
+                // Parse and evaluate
+                int result = Parser.parse(line);
+                System.out.println("= " + result);
+            } catch (Exception e) {
+                System.err.println("Error: " + e.getMessage());
+            }
+        }
+    }
+}
+```
 
 ### Python Integration
 

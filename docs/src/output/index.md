@@ -23,6 +23,16 @@ openlexer gen-parser --parser grammar.y --lang java --output ./
 | Java | `Lexer.java` | `Parser.java` |
 | Python | `lexer.py` | `parser.py` |
 
+## File Organization
+
+Each language has specific file organization requirements and best practices:
+
+- **Java**: Requires one public class per file; generated files are designed to work standalone or together
+- **C**: Can be compiled separately or combined; use preprocessor flags to control test drivers
+- **Python**: Generated files are importable modules
+
+**📖 See [File Organization Guide](../FILE_ORGANIZATION.md) for detailed instructions on organizing generated code.**
+
 ## Common Interface
 
 All generated lexers provide:

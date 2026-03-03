@@ -434,8 +434,18 @@ fn generate_java_minimal(dfa: &crate::lexgen::dfa::Dfa, spec: &LexerSpec) -> Res
     }
     c.push_str("        default: return TOKEN_ERROR;\n        }\n    }\n\n");
 
-    // nextToken
-    c.push_str("    public int[] nextToken() {\n");
+    // Token class for lexer-parser integration
+    c.push_str("    public static class Token {\n");
+    c.push_str("        public final int type;\n");
+    c.push_str("        public final String text;\n");
+    c.push_str("        public final int pos;\n");
+    c.push_str("        public Token(int type, String text, int pos) {\n");
+    c.push_str("            this.type = type; this.text = text; this.pos = pos;\n");
+    c.push_str("        }\n");
+    c.push_str("    }\n\n");
+
+    // nextToken - returns Token object for parser compatibility
+    c.push_str("    public Token nextToken() {\n");
     c.push_str("        while (pos < src.length()) {\n");
     c.push_str("            int start = pos, state = 0, lastRule = -1, lastPos = start;\n");
     c.push_str("            while (pos < src.length()) {\n");
@@ -449,12 +459,12 @@ fn generate_java_minimal(dfa: &crate::lexgen::dfa::Dfa, spec: &LexerSpec) -> Res
     c.push_str("                pos = lastPos;\n");
     c.push_str("                int tok = ruleToken(lastRule);\n");
     c.push_str("                if (tok < 0) continue;\n");
-    c.push_str("                return new int[]{tok, start, lastPos - start};\n");
+    c.push_str("                return new Token(tok, src.substring(start, lastPos), start);\n");
     c.push_str("            }\n");
     c.push_str("            pos = start + 1;\n");
-    c.push_str("            return new int[]{TOKEN_ERROR, start, 1};\n");
+    c.push_str("            return new Token(TOKEN_ERROR, src.substring(start, start+1), start);\n");
     c.push_str("        }\n");
-    c.push_str("        return new int[]{TOKEN_EOF, pos, 0};\n");
+    c.push_str("        return new Token(TOKEN_EOF, \"\", pos);\n");
     c.push_str("    }\n\n");
 
     // Main

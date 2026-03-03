@@ -27,9 +27,23 @@ OpenLexer uses the standard Flex/Bison file formats:
 # Generate a Python lexer from calc.l
 openlexer gen-lexer --lexer calc.l --lang python --output ./
 
-# Generate a C parser from calc.y
-openlexer gen-parser --parser calc.y --lang c --output ./
+# Generate a Java parser from calc.y 
+openlexer gen-parser --parser calc.y --lang java --output ./
+
+# For Java: compile and run
+javac Lexer.java Parser.java
+java Parser "3 + 4 * 2"
 ```
+
+## Key Features
+
+- **Smart File Organization**: Generated code follows language-specific best practices
+  - Java: One public class per file, automatic lexer detection
+  - C: Flexible compilation with preprocessor controls
+  - Python: Module-based imports
+- **Complete Integration**: Lexer and parser work seamlessly together
+- **Standalone or Combined**: Each component can work independently or together
+- **Built-in Test Drivers**: Generated code includes test scaffolding
 
 ## Documentation Structure
 

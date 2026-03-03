@@ -52,38 +52,75 @@ expr:
 
 ## Step 3: Generate Code
 
+### Option A: Python
+
 ```bash
 # Generate Python lexer and parser
-openlexer gen-lexer --lexer calc.l --lang python --output ./
-openlexer gen-parser --parser calc.y --lang python --output ./
+openlexer gen-lexer --lexer calc.l -L python -o ./
+openlexer gen-parser --parser calc.y -L python -o ./
 ```
 
 This produces `lexer.py` and `parser.py`.
 
-## Step 4: Use the Generated Code
+**Use the generated code:**
 
-Create `main.py`:
+```bash
+# Test the parser directly
+python parser.py "3 + 4 * 2"
+# Output: Result: 11
+```
+
+Or create `main.py`:
 
 ```python
-from lexer import Lexer
-from parser import Parser
+from parser import parse
 
-lexer = Lexer("3 + 4 * 2")
-parser = Parser(lexer)
-result = parser.parse()
+result = parse("3 + 4 * 2")
 print(f"Result: {result}")
 ```
 
-Run:
+### Option B: Java
 
 ```bash
-python main.py
+# Generate Java lexer and parser
+openlexer gen-lexer --lexer calc.l -L java -o ./
+openlexer gen-parser --parser calc.y -L java -o ./
 ```
 
-Output:
+This produces `Lexer.java` and `Parser.java`.
 
+**Compile and run:**
+
+```bash
+# Compile both files
+javac Lexer.java Parser.java
+
+# Run parser (auto-detects Lexer.class)
+java Parser "3 + 4 * 2"
+# Output: [Using external Lexer.class]
+#         Input: "3 + 4 * 2"
+#         Result: 11
 ```
-Result: 11
+
+### Option C: C
+
+```bash
+# Generate C lexer and parser
+openlexer gen-lexer --lexer calc.l -L c -o ./
+openlexer gen-parser --parser calc.y -L c -o ./
+```
+
+This produces `lexer.c` and `parser.c`.
+
+**Compile and run:**
+
+```bash
+# Compile and link
+gcc -o calc parser.c -lm
+
+# Run
+./calc "3 + 4 * 2"
+# Output: Result: 11
 ```
 
 ## Next Steps

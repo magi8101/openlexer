@@ -51,7 +51,34 @@ openlexer gen-parser --parser grammar.y --lang java --output output/
 | C        | Yes   | Yes    |
 | Java     | Yes   | Yes    |
 
-## Example
+## File Organization
+
+OpenLexer generates well-organized code following language-specific best practices:
+
+### Java
+- **Lexer Only**: Generates `Lexer.java` with public Lexer class
+- **Parser Only**: Generates `Parser.java` with public Parser class (includes inline lexer)
+- **Both**: Generate separate files and compile together:
+  ```bash
+  openlexer gen-lexer --lexer rules.l -L java -o output/
+  openlexer gen-parser --parser grammar.y -L java -o output/
+  javac output/Lexer.java output/Parser.java
+  java -cp output Parser "3 + 4 * 2"
+  ```
+  Parser automatically detects and uses external Lexer.class if available.
+
+### C
+- **Lexer**: Generates `lexer.c`
+- **Parser**: Generates `parser.c`
+- Use `-DLEXER_NO_MAIN -DPARSER_NO_MAIN` flags to disable test drivers when linking
+
+### Python
+- **Lexer**: Generates `lexer.py` (importable module)
+- **Parser**: Generates `parser.py` (can import external lexer)
+
+**📖 See [docs/FILE_ORGANIZATION.md](docs/FILE_ORGANIZATION.md) for detailed file organization guide**
+
+## Supported Languages
 
 ### Lexer Specification (calc.l)
 

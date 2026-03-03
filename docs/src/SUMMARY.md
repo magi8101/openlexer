@@ -24,6 +24,7 @@
   - [C Output](./output/c.md)
   - [Java Output](./output/java.md)
   - [Python Output](./output/python.md)
+  - [File Organization](../FILE_ORGANIZATION.md)
 
 # Examples
 
