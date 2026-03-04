@@ -1691,8 +1691,20 @@ fn generate_java_parser_test_driver() -> String {
     code.push_str("                Object tok = nextTokenMethod.invoke(lexer);\n");
     code.push_str("                // Get type and text via reflection\n");
     code.push_str("                Object typeObj = tok.getClass().getField(\"type\").get(tok);\n");
-    code.push_str("                String type = typeObj.toString();\n");
-    code.push_str("                if (type.equals(\"EOF\")) type = \"$\";\n");
+    code.push_str("                String type;\n");
+    code.push_str("                if (typeObj instanceof Number) {\n");
+    code.push_str("                    int typeId = ((Number) typeObj).intValue();\n");
+    code.push_str("                    try {\n");
+    code.push_str("                        java.lang.reflect.Method tokenNameMethod = lexer.getClass().getMethod(\"tokenName\", int.class);\n");
+    code.push_str("                        type = String.valueOf(tokenNameMethod.invoke(null, typeId));\n");
+    code.push_str("                    } catch (Exception ex) {\n");
+    code.push_str("                        type = String.valueOf(typeId);\n");
+    code.push_str("                    }\n");
+    code.push_str("                } else {\n");
+    code.push_str("                    type = typeObj.toString();\n");
+    code.push_str("                }\n");
+    code.push_str("                if (type.startsWith(\"TOKEN_\")) type = type.substring(6);\n");
+    code.push_str("                if (type.equals(\"EOF\") || type.equals(\"TOKEN_EOF\") || type.equals(\"0\")) type = \"$\";\n");
     code.push_str(
         "                String text = (String) tok.getClass().getField(\"text\").get(tok);\n",
     );
@@ -1947,8 +1959,16 @@ pub fn generate_python_parser_test_driver() -> String {
     code.push_str("class AdaptedToken:\n");
     code.push_str("    \"\"\"Token adapter for parser compatibility.\"\"\"\n");
     code.push_str("    def __init__(self, tok):\n");
-    code.push_str("        # Convert enum to string ('$' for EOF)\n");
-    code.push_str("        self.type = '$' if tok.type.name == 'EOF' else tok.type.name\n");
+    code.push_str("        # Convert enum to parser terminal names ('$' for EOF)\n");
+    code.push_str("        raw_type = tok.type.name\n");
+    code.push_str("        token_aliases = {\n");
+    code.push_str("            'EOF': '$',\n");
+    code.push_str("            'INTEGER_LITERAL': 'NUMBER',\n");
+    code.push_str("            'INT_LITERAL': 'NUMBER',\n");
+    code.push_str("            'NUM_LITERAL': 'NUMBER',\n");
+    code.push_str("            'FLOAT_LITERAL': 'NUMBER',\n");
+    code.push_str("        }\n");
+    code.push_str("        self.type = token_aliases.get(raw_type, raw_type)\n");
     code.push_str("        self.text = tok.text\n");
     code.push_str("        self.pos = tok.pos\n");
     code.push_str("        # Extract numeric value for NUMBER tokens\n");
