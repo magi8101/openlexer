@@ -108,12 +108,9 @@
         };
     </script>
 
-    <!-- Code Execution: Piston API (Server-side) -->
 
     <script>
-        // ====================================================================
-        // Code Execution Runtimes
-        // ====================================================================
+ 
 
         // --- Shared State ---
         let _runResults = {};
@@ -267,6 +264,18 @@
             try {
                 console.log("[Status] Sending Java code to Backend Proxy...");
 
+                // Pick a sensible source filename from code content.
+                // This avoids class/file mismatch when running parser-only code.
+                let javaFileName = "Main.java";
+                const publicClassMatch = code.match(/public\s+class\s+([A-Za-z_][A-Za-z0-9_]*)/);
+                if (publicClassMatch && publicClassMatch[1]) {
+                    javaFileName = `${publicClassMatch[1]}.java`;
+                } else if (/\bclass\s+Parser\b/.test(code) && !/\bclass\s+Lexer\b/.test(code)) {
+                    javaFileName = "Parser.java";
+                } else if (/\bclass\s+Lexer\b/.test(code)) {
+                    javaFileName = "Lexer.java";
+                }
+
                 const response = await fetch(BACKEND_URL, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -275,7 +284,7 @@
                         version: "15.0.2",
                         files: [
                             {
-                                name: "Lexer.java",
+                                name: javaFileName,
                                 content: code
                             }
                         ],
