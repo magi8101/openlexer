@@ -376,7 +376,7 @@ fn generate_java_minimal(table: &ParsingTable, grammar: &Grammar) -> Result<Stri
     c.push_str(" *   - OR compile with separate Lexer.java if available\n");
     c.push_str(" *   - For combined use: javac Lexer.java Parser.java && java Parser\n");
     c.push_str(" */\n");
-    c.push_str("public class Parser {\n");
+    c.push_str("class Parser {\n");
 
     // Token IDs
     c.push_str("    static final int T_EOF = 0");
@@ -1408,7 +1408,7 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("import java.util.Stack;\n");
     code.push_str("import java.util.HashMap;\n");
     code.push_str("import java.util.ArrayList;\n\n");
-    code.push_str("public class Parser {\n");
+    code.push_str("class Parser {\n");
 
     // Generate YYSTYPE class if union is declared
     if grammar.has_union() {
@@ -1475,9 +1475,15 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     );
     code.push_str("    private int[][] rules; // [lhs_id, rhs_len]\n");
     code.push_str("    private int yynerrs = 0;\n\n");
+    code.push_str("    private Lexer defaultLexer;\n\n");
 
     code.push_str("    public Parser() {\n");
     code.push_str("        initTables();\n");
+    code.push_str("    }\n\n");
+
+    code.push_str("    public Parser(Lexer lexer) {\n");
+    code.push_str("        this();\n");
+    code.push_str("        this.defaultLexer = lexer;\n");
     code.push_str("    }\n\n");
 
     code.push_str("    private void initTables() {\n");
@@ -1542,7 +1548,15 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("        }\n");
     code.push_str("    }\n\n");
 
+    code.push_str("    public int parse() {\n");
+    code.push_str("        if (defaultLexer == null) {\n");
+    code.push_str("            throw new IllegalStateException(\"No lexer provided. Use Parser(Lexer) or parse(Lexer).\");\n");
+    code.push_str("        }\n");
+    code.push_str("        return parse(defaultLexer);\n");
+    code.push_str("    }\n\n");
+
     code.push_str("    public int parse(Lexer lexer) {\n");
+    code.push_str("        this.defaultLexer = lexer;\n");
     code.push_str("        Stack<Integer> stack = new Stack<>();\n");
     code.push_str("        Stack<Integer> valueStack = new Stack<>();\n");
     code.push_str("        stack.push(0);\n");
