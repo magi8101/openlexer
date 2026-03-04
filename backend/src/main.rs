@@ -19,6 +19,7 @@ struct PistonRequest {
 
 #[derive(Deserialize)]
 struct PistonFile {
+    name: Option<String>,
     content: String,
 }
 
@@ -57,6 +58,64 @@ struct WandboxResponse {
     compiler_error: Option<String>,   // compiler errors
 }
 
+// Merge multiple files intelligently based on language
+fn merge_files(files: &[PistonFile], language: &str) -> String {
+    match language {
+        "python" => {
+            // Python: concatenate files with comments for separation
+            let mut merged = String::new();
+            for (idx, file) in files.iter().enumerate() {
+                if idx > 0 {
+                    let idx_str = idx.to_string();
+                    let file_label = file.name.as_ref().map(|n| n.as_str()).unwrap_or(idx_str.as_str());
+                    merged.push_str("\n\n# ============ File ");
+                    merged.push_str(file_label);
+                    merged.push_str(" ============\n");
+                    log::info!("Merging Python file: {}", file_label);
+                }
+                merged.push_str(&file.content);
+            }
+            merged
+        },
+        "java" => {
+            // Java: concatenate classes (they should have proper class/package declarations)
+            let mut merged = String::new();
+            for (idx, file) in files.iter().enumerate() {
+                if idx > 0 {
+                    let idx_str = idx.to_string();
+                    let file_label = file.name.as_ref().map(|n| n.as_str()).unwrap_or(idx_str.as_str());
+                    merged.push_str("\n\n// ============ File ");
+                    merged.push_str(file_label);
+                    merged.push_str(" ============\n");
+                    log::info!("Merging Java file: {}", file_label);
+                }
+                merged.push_str(&file.content);
+            }
+            merged
+        },
+        "c" => {
+            // C: concatenate with includes. Put declarations first, implementations after
+            let mut merged = String::new();
+            for (idx, file) in files.iter().enumerate() {
+                if idx > 0 {
+                    let idx_str = idx.to_string();
+                    let file_label = file.name.as_ref().map(|n| n.as_str()).unwrap_or(idx_str.as_str());
+                    merged.push_str("\n\n/* ============ File ");
+                    merged.push_str(file_label);
+                    merged.push_str(" ============ */\n");
+                    log::info!("Merging C file: {}", file_label);
+                }
+                merged.push_str(&file.content);
+            }
+            merged
+        },
+        _ => {
+            // Fallback: just use first file
+            files.first().map(|f| f.content.clone()).unwrap_or_default()
+        }
+    }
+}
+
 async fn execute_code(
     state: web::Data<AppState>,
     body: web::Json<PistonRequest>,
@@ -71,10 +130,14 @@ async fn execute_code(
         _ => return HttpResponse::BadRequest().body("Unsupported language"),
     };
 
-    // 2. Extract code
-    let source_code = match body.files.first() {
-        Some(f) => f.content.clone(),
-        None => return HttpResponse::BadRequest().body("No source code provided"),
+    // 2. Extract and merge code from all files intelligently
+    let source_code = if body.files.is_empty() {
+        return HttpResponse::BadRequest().body("No source code provided");
+    } else if body.files.len() == 1 {
+        body.files[0].content.clone()
+    } else {
+        // Multiple files: merge intelligently by language
+        merge_files(&body.files, &body.language)
     };
 
     // 3. Construct Wandbox Request
