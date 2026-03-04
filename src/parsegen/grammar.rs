@@ -60,6 +60,8 @@ pub struct Grammar {
     pub lac_enabled: bool,
     /// Prologue code from %{ ... %} section.
     pub prologue: Option<String>,
+    /// Epilogue code from section after second %%.
+    pub epilogue: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +112,7 @@ impl Grammar {
             error_verbose: false,
             lac_enabled: false,
             prologue: None,
+            epilogue: None,
         }
     }
 
@@ -163,6 +166,15 @@ impl<'a> GrammarParser<'a> {
         if self.consume("%%") {
             // 3. Rules section
             self.parse_rules()?;
+
+            // 4. Optional epilogue section (after second %% in Bison format)
+            self.skip_whitespace_and_comments();
+            if self.consume("%%") {
+                let rest = self.input[self.pos..].trim();
+                if !rest.is_empty() {
+                    self.grammar.epilogue = Some(rest.to_string());
+                }
+            }
         } else {
             return Err(Error::GrammarError {
                 line: 0,
@@ -170,7 +182,7 @@ impl<'a> GrammarParser<'a> {
             });
         }
 
-        // 4. Default start symbol if not specified
+        // 5. Default start symbol if not specified
         if self.grammar.start_symbol.is_empty() {
             if let Some(first_rule) = self.grammar.rules.first() {
                 self.grammar.start_symbol = first_rule.lhs.clone();

@@ -50,6 +50,7 @@ fn augment_grammar(grammar: &Grammar) -> Grammar {
         error_verbose: grammar.error_verbose,
         lac_enabled: grammar.lac_enabled,
         prologue: grammar.prologue.clone(),
+        epilogue: grammar.epilogue.clone(),
     }
 }
 
