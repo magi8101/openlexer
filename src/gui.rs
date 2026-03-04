@@ -1273,11 +1273,11 @@ impl OpenLexerApp {
                         if run_btn.clicked() {
                             let code = self.parser_output.clone();
                             let extra = if self.language == TargetLanguage::Python && !self.lexer_output.trim().is_empty() {
-                                Some(self.lexer_output.as_str())
+                                Some(self.lexer_output.clone())
                             } else {
                                 None
                             };
-                            self.run_generated_code(&code, extra);
+                            self.run_generated_code(&code, extra.as_deref());
                         }
                     });
                 });
