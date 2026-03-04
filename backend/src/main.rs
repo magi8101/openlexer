@@ -43,9 +43,17 @@ struct WandboxRequest {
     compiler: String,
     code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    codes: Option<Vec<WandboxCode>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     stdin: Option<String>,
     #[serde(rename = "compiler-option-raw", skip_serializing_if = "Option::is_none")]
     compiler_option_raw: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WandboxCode {
+    file: String,
+    code: String,
 }
 
 // Wandbox Response
@@ -58,62 +66,14 @@ struct WandboxResponse {
     compiler_error: Option<String>,   // compiler errors
 }
 
-// Merge multiple files intelligently based on language
-fn merge_files(files: &[PistonFile], language: &str) -> String {
-    match language {
-        "python" => {
-            // Python: concatenate files with comments for separation
-            let mut merged = String::new();
-            for (idx, file) in files.iter().enumerate() {
-                if idx > 0 {
-                    let idx_str = idx.to_string();
-                    let file_label = file.name.as_ref().map(|n| n.as_str()).unwrap_or(idx_str.as_str());
-                    merged.push_str("\n\n# ============ File ");
-                    merged.push_str(file_label);
-                    merged.push_str(" ============\n");
-                    log::info!("Merging Python file: {}", file_label);
-                }
-                merged.push_str(&file.content);
-            }
-            merged
-        },
-        "java" => {
-            // Java: concatenate classes (they should have proper class/package declarations)
-            let mut merged = String::new();
-            for (idx, file) in files.iter().enumerate() {
-                if idx > 0 {
-                    let idx_str = idx.to_string();
-                    let file_label = file.name.as_ref().map(|n| n.as_str()).unwrap_or(idx_str.as_str());
-                    merged.push_str("\n\n// ============ File ");
-                    merged.push_str(file_label);
-                    merged.push_str(" ============\n");
-                    log::info!("Merging Java file: {}", file_label);
-                }
-                merged.push_str(&file.content);
-            }
-            merged
-        },
-        "c" => {
-            // C: concatenate with includes. Put declarations first, implementations after
-            let mut merged = String::new();
-            for (idx, file) in files.iter().enumerate() {
-                if idx > 0 {
-                    let idx_str = idx.to_string();
-                    let file_label = file.name.as_ref().map(|n| n.as_str()).unwrap_or(idx_str.as_str());
-                    merged.push_str("\n\n/* ============ File ");
-                    merged.push_str(file_label);
-                    merged.push_str(" ============ */\n");
-                    log::info!("Merging C file: {}", file_label);
-                }
-                merged.push_str(&file.content);
-            }
-            merged
-        },
-        _ => {
-            // Fallback: just use first file
-            files.first().map(|f| f.content.clone()).unwrap_or_default()
-        }
-    }
+fn default_extra_filename(language: &str, idx: usize) -> String {
+    let ext = match language {
+        "python" => "py",
+        "java" => "java",
+        "c" => "c",
+        _ => "txt",
+    };
+    format!("extra_{}.{}", idx, ext)
 }
 
 async fn execute_code(
@@ -130,20 +90,40 @@ async fn execute_code(
         _ => return HttpResponse::BadRequest().body("Unsupported language"),
     };
 
-    // 2. Extract and merge code from all files intelligently
+    // 2. Extract main code and pass extra files as real companion files
     let source_code = if body.files.is_empty() {
         return HttpResponse::BadRequest().body("No source code provided");
-    } else if body.files.len() == 1 {
-        body.files[0].content.clone()
     } else {
-        // Multiple files: merge intelligently by language
-        merge_files(&body.files, &body.language)
+        body.files[0].content.clone()
     };
+
+    let extra_files: Vec<WandboxCode> = body
+        .files
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(idx, file)| {
+            let file_name = file
+                .name
+                .clone()
+                .unwrap_or_else(|| default_extra_filename(&body.language, idx));
+            log::info!("Including extra file for Wandbox: {}", file_name);
+            WandboxCode {
+                file: file_name,
+                code: file.content.clone(),
+            }
+        })
+        .collect();
 
     // 3. Construct Wandbox Request
     let wandbox_req = WandboxRequest {
         compiler: compiler.to_string(),
         code: source_code,
+        codes: if extra_files.is_empty() {
+            None
+        } else {
+            Some(extra_files)
+        },
         stdin: body.stdin.clone(),
         compiler_option_raw: options.map(|s: &str| s.to_string()),
     };
