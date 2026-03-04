@@ -116,7 +116,7 @@
         let _runResults = {};
         let _runCounter = 0;
 
-        function startCodeRun(language, code, testInput) {
+        function startCodeRun(language, code, testInput, extraCode = "") {
             const id = ++_runCounter;
             _runResults[id] = { done: false, output: '' };
 
@@ -125,7 +125,7 @@
                 try {
                     let result = "";
                     if (language === 'python') {
-                        result = await runPython(code, testInput);
+                        result = await runPython(code, testInput, extraCode);
                     } else if (language === 'c') {
                         result = await runC(code, testInput);
                     } else if (language === 'java') {
@@ -163,9 +163,23 @@
             : "https://YOUR-RENDER-APP-NAME.onrender.com/execute"; // <--- CHANGE THIS TO YOUR RENDER URL
 
         // --- Python (via Backend Proxy) ---
-        async function runPython(code, testInput) {
+        async function runPython(code, testInput, extraCode = "") {
             try {
                 console.log("[Status] Sending Python code to Backend Proxy...");
+
+                const files = [
+                    {
+                        name: "main.py",
+                        content: code
+                    }
+                ];
+
+                if (extraCode && extraCode.trim().length > 0) {
+                    files.push({
+                        name: "lexer.py",
+                        content: extraCode
+                    });
+                }
 
                 const response = await fetch(BACKEND_URL, {
                     method: "POST",
@@ -173,12 +187,7 @@
                     body: JSON.stringify({
                         language: "python",
                         version: "3.10.0",
-                        files: [
-                            {
-                                name: "main.py",
-                                content: code
-                            }
-                        ],
+                        files,
                         stdin: testInput || "",
                         args: testInput ? [testInput] : [],
                         compile_timeout: 10000,

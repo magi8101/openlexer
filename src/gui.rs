@@ -36,7 +36,7 @@ use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 extern "C" {
-    fn startCodeRun(language: &str, code: &str, testInput: &str) -> i32;
+    fn startCodeRun(language: &str, code: &str, testInput: &str, extraCode: &str) -> i32;
     fn isRunDone(id: i32) -> bool;
     fn getRunResult(id: i32) -> String;
 }
@@ -742,7 +742,7 @@ impl OpenLexerApp {
 
         let total_lines = full_code.lines().count();
         self.log(LogLevel::Info, &format!("Running {} code ({} lines total: generated + your test)", self.language.display_name(), total_lines));
-        self.run_generated_code(&full_code);
+        self.run_generated_code(&full_code, None);
     }
 
     fn strip_default_main(&self, code: &str) -> String {
@@ -771,7 +771,7 @@ impl OpenLexerApp {
     // Code Execution
     // ========================================================================
 
-    fn run_generated_code(&mut self, code: &str) {
+    fn run_generated_code(&mut self, code: &str, extra_code: Option<&str>) {
         if code.is_empty() {
             self.log(LogLevel::Warning, "No generated code to run. Click Generate first.");
             return;
@@ -784,7 +784,7 @@ impl OpenLexerApp {
 
         #[cfg(target_arch = "wasm32")]
         {
-            let id = startCodeRun(lang_str, code, &self.run_input);
+            let id = startCodeRun(lang_str, code, &self.run_input, extra_code.unwrap_or(""));
             self._run_id = Some(id);
         }
 
@@ -1044,7 +1044,7 @@ impl OpenLexerApp {
 
                         if run_btn.clicked() {
                             let code = self.lexer_output.clone();
-                            self.run_generated_code(&code);
+                            self.run_generated_code(&code, None);
                         }
                     });
                 });
@@ -1272,7 +1272,12 @@ impl OpenLexerApp {
 
                         if run_btn.clicked() {
                             let code = self.parser_output.clone();
-                            self.run_generated_code(&code);
+                            let extra = if self.language == TargetLanguage::Python && !self.lexer_output.trim().is_empty() {
+                                Some(self.lexer_output.as_str())
+                            } else {
+                                None
+                            };
+                            self.run_generated_code(&code, extra);
                         }
                     });
                 });
