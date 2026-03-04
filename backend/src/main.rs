@@ -90,40 +90,41 @@ async fn execute_code(
         _ => return HttpResponse::BadRequest().body("Unsupported language"),
     };
 
-    // 2. Extract main code and pass extra files as real companion files
-    let source_code = if body.files.is_empty() {
+    // 2. Build file list for Wandbox
+    if body.files.is_empty() {
         return HttpResponse::BadRequest().body("No source code provided");
-    } else {
-        body.files[0].content.clone()
-    };
+    }
 
-    let extra_files: Vec<WandboxCode> = body
-        .files
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(idx, file)| {
-            let file_name = file
-                .name
-                .clone()
-                .unwrap_or_else(|| default_extra_filename(&body.language, idx));
-            log::info!("Including extra file for Wandbox: {}", file_name);
-            WandboxCode {
-                file: file_name,
-                code: file.content.clone(),
-            }
-        })
-        .collect();
+    // For multi-file projects, put ALL files in codes array so imports work
+    let (source_code, codes_array) = if body.files.len() > 1 {
+        // Multi-file: use codes array for all files
+        let all_files: Vec<WandboxCode> = body
+            .files
+            .iter()
+            .enumerate()
+            .map(|(idx, file)| {
+                let file_name = file
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| default_extra_filename(&body.language, idx));
+                log::info!("Including file for Wandbox: {}", file_name);
+                WandboxCode {
+                    file: file_name,
+                    code: file.content.clone(),
+                }
+            })
+            .collect();
+        ("".to_string(), Some(all_files))
+    } else {
+        // Single file: use code field directly
+        (body.files[0].content.clone(), None)
+    };
 
     // 3. Construct Wandbox Request
     let wandbox_req = WandboxRequest {
         compiler: compiler.to_string(),
         code: source_code,
-        codes: if extra_files.is_empty() {
-            None
-        } else {
-            Some(extra_files)
-        },
+        codes: codes_array,
         stdin: body.stdin.clone(),
         compiler_option_raw: options.map(|s: &str| s.to_string()),
     };
