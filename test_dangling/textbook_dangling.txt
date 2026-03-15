@@ -1,0 +1,4 @@
+S → if ( E ) S else S
+S → if ( E ) S
+S → other
+E → condition

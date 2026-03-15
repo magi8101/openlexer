@@ -85,6 +85,35 @@ pub enum StartConditionType {
     Exclusive,
 }
 
+/// Lexer options parsed from %option directives.
+#[derive(Debug, Clone, Default)]
+pub struct LexerOptions {
+    /// Generate reentrant lexer (no global state).
+    pub reentrant: bool,
+    /// Generate Bison-compatible interface.
+    pub bison_bridge: bool,
+    /// Generate location tracking for Bison.
+    pub bison_locations: bool,
+    /// Do not call yywrap() at EOF.
+    pub noyywrap: bool,
+    /// Do not generate input() function.
+    pub noinput: bool,
+    /// Do not generate unput() function.
+    pub nounput: bool,
+    /// Track line numbers automatically.
+    pub yylineno: bool,
+    /// Case-insensitive matching.
+    pub case_insensitive: bool,
+    /// Generate debug code.
+    pub debug: bool,
+    /// Prefix for generated functions (default: "yy").
+    pub prefix: Option<String>,
+    /// Output file name.
+    pub outfile: Option<String>,
+    /// Header file name.
+    pub header_file: Option<String>,
+}
+
 /// A complete lexer specification parsed from a .l file.
 #[derive(Debug, Clone)]
 pub struct LexerSpec {
@@ -98,6 +127,8 @@ pub struct LexerSpec {
     pub prologue: String,
     /// User code from the section after the second %%.
     pub user_code: String,
+    /// Lexer options from %option directives.
+    pub options: LexerOptions,
 }
 
 impl LexerSpec {
@@ -112,6 +143,7 @@ impl LexerSpec {
             rules: Vec::new(),
             prologue: String::new(),
             user_code: String::new(),
+            options: LexerOptions::default(),
         };
 
         // Always have INITIAL as an inclusive start condition
@@ -319,6 +351,12 @@ impl LexerSpec {
                 continue;
             }
 
+            // Parse %option directives
+            if trimmed.starts_with("%option") {
+                self.parse_option_line(&trimmed[7..])?;
+                continue;
+            }
+
             // Skip other % directives we don't handle yet
             if trimmed.starts_with('%') {
                 continue;
@@ -334,6 +372,109 @@ impl LexerSpec {
                     self.definitions.insert(name, pattern);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Parses a %option line. Supports both space-separated and individual option formats.
+    /// Examples:
+    /// - `%option reentrant noyywrap`
+    /// - `%option prefix="xx"`
+    /// - `%option outfile="lexer.c"`
+    fn parse_option_line(&mut self, options_str: &str) -> Result<()> {
+        let trimmed = options_str.trim();
+
+        // Split by whitespace, but handle quoted values
+        let mut i = 0;
+        let chars: Vec<char> = trimmed.chars().collect();
+
+        while i < chars.len() {
+            // Skip whitespace
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            if i >= chars.len() {
+                break;
+            }
+
+            // Collect option name
+            let start = i;
+            while i < chars.len() && chars[i] != '=' && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            let opt_name: String = chars[start..i].iter().collect();
+
+            // Check for value (=...)
+            let opt_value = if i < chars.len() && chars[i] == '=' {
+                i += 1; // skip '='
+
+                // Check for quoted value
+                if i < chars.len() && chars[i] == '"' {
+                    i += 1; // skip opening quote
+                    let val_start = i;
+                    while i < chars.len() && chars[i] != '"' {
+                        i += 1;
+                    }
+                    let val: String = chars[val_start..i].iter().collect();
+                    if i < chars.len() {
+                        i += 1; // skip closing quote
+                    }
+                    Some(val)
+                } else {
+                    // Unquoted value
+                    let val_start = i;
+                    while i < chars.len() && !chars[i].is_whitespace() {
+                        i += 1;
+                    }
+                    Some(chars[val_start..i].iter().collect())
+                }
+            } else {
+                None
+            };
+
+            // Apply the option
+            self.apply_option(&opt_name, opt_value.as_deref())?;
+        }
+
+        Ok(())
+    }
+
+    /// Applies a single option.
+    fn apply_option(&mut self, name: &str, value: Option<&str>) -> Result<()> {
+        match name {
+            "reentrant" => self.options.reentrant = true,
+            "noreentrant" => self.options.reentrant = false,
+            "bison-bridge" => self.options.bison_bridge = true,
+            "bison-locations" => self.options.bison_locations = true,
+            "noyywrap" => self.options.noyywrap = true,
+            "yywrap" => self.options.noyywrap = false,
+            "noinput" => self.options.noinput = true,
+            "input" => self.options.noinput = false,
+            "nounput" => self.options.nounput = true,
+            "unput" => self.options.nounput = false,
+            "yylineno" => self.options.yylineno = true,
+            "noyylineno" => self.options.yylineno = false,
+            "case-insensitive" | "caseless" => self.options.case_insensitive = true,
+            "case-sensitive" => self.options.case_insensitive = false,
+            "debug" => self.options.debug = true,
+            "nodebug" => self.options.debug = false,
+            "prefix" => {
+                if let Some(v) = value {
+                    self.options.prefix = Some(v.to_string());
+                }
+            }
+            "outfile" => {
+                if let Some(v) = value {
+                    self.options.outfile = Some(v.to_string());
+                }
+            }
+            "header-file" => {
+                if let Some(v) = value {
+                    self.options.header_file = Some(v.to_string());
+                }
+            }
+            // Silently ignore unknown options for forward compatibility
+            _ => {}
         }
         Ok(())
     }

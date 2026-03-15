@@ -62,6 +62,9 @@ pub struct Grammar {
     pub prologue: Option<String>,
     /// Epilogue code from section after second %%.
     pub epilogue: Option<String>,
+    /// Maps token names to their original literal strings (for textbook notation).
+    /// E.g. "LPAREN" → "(", "IF" → "if". Used by generate_lexer_spec().
+    pub token_literals: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +116,7 @@ impl Grammar {
             lac_enabled: false,
             prologue: None,
             epilogue: None,
+            token_literals: HashMap::new(),
         }
     }
 
@@ -129,6 +133,57 @@ impl Grammar {
         self.raw_union_body.is_some() || !self.union_fields.is_empty()
     }
 
+    /// Generate a lexer specification (.l format) from the grammar's terminal symbols.
+    /// This allows users to write just the grammar in textbook notation and get
+    /// both a parser and a matching lexer automatically — like Bison+Flex but
+    /// without needing to write a separate .l file.
+    ///
+    /// Terminal classification:
+    ///   - Alphabetic tokens (e.g. "if", "else", "other") → keyword literals
+    ///   - Single punctuation chars (e.g. "(", ")") → literal match
+    ///   - ALL_CAPS identifiers → kept as-is (user-defined token names)
+    pub fn generate_lexer_spec(&self) -> String {
+        let mut rules = Vec::new();
+
+        for token in &self.tokens {
+            // Look up the original literal from token_literals map
+            let literal = self.token_literals.get(token).cloned().unwrap_or_else(|| token.clone());
+
+            // Escape regex metacharacters in the literal
+            let escaped: String = literal.chars().map(|ch| {
+                match ch {
+                    '(' | ')' | '[' | ']' | '{' | '}' | '.' | '*' | '+' | '?'
+                    | '\\' | '^' | '$' | '|' => format!("\\{}", ch),
+                    _ => ch.to_string(),
+                }
+            }).collect();
+
+            rules.push(format!(
+                "\"{}\"    {{ return {}; }}",
+                escaped, token
+            ));
+        }
+
+        // Add identifier rule for any identifier-like terminals
+        let has_identifier_tokens = self.tokens.iter().any(|t| {
+            let lit = self.token_literals.get(t).cloned().unwrap_or_else(|| t.clone());
+            lit.chars().all(|c| c.is_alphabetic() || c == '_')
+        });
+
+        if has_identifier_tokens {
+            rules.push("[a-zA-Z_][a-zA-Z0-9_]*    { return IDENTIFIER; }".to_string());
+        }
+
+        // Always add whitespace skip and catch-all
+        rules.push("[ \\t\\n]+    { /* skip whitespace */ }".to_string());
+        rules.push(".           { /* skip unknown */ }".to_string());
+
+        format!(
+            "/* Auto-generated lexer for grammar */\n\n%%\n\n{}\n\n%%\n",
+            rules.join("\n")
+        )
+    }
+
     /// Parses a grammar string.
     pub fn parse(input: &str) -> Result<Self> {
         let mut parser = GrammarParser::new(input);
@@ -140,6 +195,8 @@ struct GrammarParser<'a> {
     input: &'a str,
     pos: usize,
     grammar: Grammar,
+    /// Pending mid-rule action rules to be added after current rule parsing.
+    pending_mid_rule_actions: Vec<Rule>,
 }
 
 impl<'a> GrammarParser<'a> {
@@ -148,12 +205,23 @@ impl<'a> GrammarParser<'a> {
             input,
             pos: 0,
             grammar: Grammar::new(),
+            pending_mid_rule_actions: Vec::new(),
         }
     }
 
     fn parse(&mut self) -> Result<Grammar> {
         // First, check if this looks like a lexer specification (.l file) instead of grammar
         self.validate_not_lexer()?;
+
+        // Auto-detect textbook notation:
+        //   S → if ( E ) S else S
+        //   S -> if ( E ) S
+        //   S : other
+        // If the input uses → or -> arrows and has no %% separator or %token
+        // declarations, parse it as simple textbook grammar notation.
+        if Self::is_textbook_notation(self.input) {
+            return self.parse_textbook();
+        }
 
         // 0. Parse prologue %{ ... %}
         self.parse_prologue();
@@ -588,6 +656,13 @@ impl<'a> GrammarParser<'a> {
             loop {
                 // Use the new signature to capture rhs, action, and precedence
                 let (rhs, action, prec) = self.parse_rhs()?;
+
+                // First, add any pending mid-rule action rules (must come before the main rule)
+                for mid_rule in self.pending_mid_rule_actions.drain(..) {
+                    self.grammar.rules.push(mid_rule);
+                }
+
+                // Now add the main rule
                 self.grammar.rules.push(Rule {
                     lhs: lhs.clone(),
                     rhs,
@@ -610,8 +685,9 @@ impl<'a> GrammarParser<'a> {
 
     fn parse_rhs(&mut self) -> Result<(Vec<Symbol>, Option<String>, Option<String>)> {
         let mut rhs = Vec::new();
-        let mut action = None;
+        let mut final_action = None;
         let mut prec = None;
+        let mut mid_rule_count = 0;
 
         loop {
             self.skip_whitespace_and_comments();
@@ -625,26 +701,54 @@ impl<'a> GrammarParser<'a> {
             }
 
             if self.peek_char() == '{' {
-                action = Some(self.parse_action_block()?);
-                break;
-            }
-            if self.peek_char() == '|' || self.peek_char() == ';' || self.is_eof() {
-                break;
-            }
+                let action = self.parse_action_block()?;
 
-            let name = self.parse_ident()?;
-            // Fix: consume may return empty if at special char like %
-            if name.is_empty() {
-                break;
-            }
+                // Check if this is a mid-rule action or final action
+                self.skip_whitespace_and_comments();
 
-            if self.grammar.tokens.contains(&name) {
-                rhs.push(Symbol::Terminal(name));
+                // Peek ahead to see if there are more symbols or %prec after this action
+                let next_char = self.peek_char();
+                let is_mid_rule = next_char != '|' && next_char != ';' && !self.is_eof()
+                    && next_char != '\0' && !self.peek_str("%prec");
+
+                // Also check if the next thing is another rule symbol
+                if is_mid_rule {
+                    // This is a mid-rule action - create a synthetic nonterminal
+                    mid_rule_count += 1;
+                    let synthetic_name = format!("@{}", self.grammar.rules.len() + mid_rule_count);
+
+                    // Create the synthetic rule (will be added after main rule parsing)
+                    self.pending_mid_rule_actions.push(Rule {
+                        lhs: synthetic_name.clone(),
+                        rhs: vec![], // Empty RHS (epsilon production)
+                        action: Some(action),
+                        precedence_sym: None,
+                    });
+
+                    // Add synthetic nonterminal to the current RHS
+                    rhs.push(Symbol::NonTerminal(synthetic_name));
+                } else {
+                    // This is the final action
+                    final_action = Some(action);
+                    break;
+                }
+            } else if self.peek_char() == '|' || self.peek_char() == ';' || self.is_eof() {
+                break;
             } else {
-                rhs.push(Symbol::NonTerminal(name));
+                let name = self.parse_ident()?;
+                // Fix: consume may return empty if at special char like %
+                if name.is_empty() {
+                    break;
+                }
+
+                if self.grammar.tokens.contains(&name) {
+                    rhs.push(Symbol::Terminal(name));
+                } else {
+                    rhs.push(Symbol::NonTerminal(name));
+                }
             }
         }
-        Ok((rhs, action, prec))
+        Ok((rhs, final_action, prec))
     }
 
     fn parse_action_block(&mut self) -> Result<String> {
@@ -720,6 +824,339 @@ impl<'a> GrammarParser<'a> {
         }
         Ok(self.input[start..self.pos].to_string())
     }
+
+    // =========================================================================
+    // Textbook notation support
+    // =========================================================================
+    //
+    // Bison classifies symbols like this (from reader.c & symtab.h):
+    //   - Symbols declared with %token → terminal (token_sym)
+    //   - Symbols appearing as LHS of a rule → nonterminal (nterm_sym)
+    //   - Remaining unknown symbols → error
+    //
+    // For textbook notation we do the same thing automatically:
+    //   1. Collect all LHS symbols → these are non-terminals
+    //   2. Everything else referenced in RHS → terminal (auto-declared)
+    //   3. First rule's LHS → start symbol
+    //   4. Single-char punctuation in the grammar → literal terminals
+
+    /// Detect whether the input uses textbook grammar notation rather than
+    /// Bison-style .y format. Returns true if:
+    ///   - Input contains → or -> as a rule separator
+    ///   - Input does NOT contain %% (Bison section separator)
+    ///   - Input does NOT contain %token declarations
+    fn is_textbook_notation(input: &str) -> bool {
+        let has_bison_markers = input.contains("%%") || input.contains("%token");
+        if has_bison_markers {
+            return false;
+        }
+
+        // Look for arrow notation - support many Unicode arrow variants
+        // that users might paste from Word, PDFs, or textbooks
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("#") {
+                continue;
+            }
+            if trimmed.contains("->") || trimmed.contains("::=") || Self::contains_arrow(trimmed) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a line contains any Unicode arrow character commonly used in grammars.
+    fn contains_arrow(s: &str) -> bool {
+        for ch in s.chars() {
+            if Self::is_arrow_char(ch) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Returns true if the character is a Unicode arrow commonly used in grammar notation.
+    fn is_arrow_char(ch: char) -> bool {
+        matches!(
+            ch,
+            '\u{2192}'   // → RIGHTWARDS ARROW (most common)
+            | '\u{21D2}' // ⇒ RIGHTWARDS DOUBLE ARROW
+            | '\u{27F6}' // ⟶ LONG RIGHTWARDS ARROW
+            | '\u{2794}' // ➔ HEAVY WIDE-HEADED RIGHTWARDS ARROW
+            | '\u{279C}' // ➜ HEAVY ROUND-TIPPED RIGHTWARDS ARROW
+            | '\u{279D}' // ➝ TRIANGLE-HEADED RIGHTWARDS ARROW
+            | '\u{279E}' // ➞ HEAVY TRIANGLE-HEADED RIGHTWARDS ARROW
+            | '\u{21A6}' // ↦ RIGHTWARDS ARROW FROM BAR
+            | '\u{2B62}' // ⭢ RIGHTWARDS TRIANGLE-HEADED ARROW
+            | '\u{2B95}' // ⮕ RIGHTWARDS BLACK ARROW
+            | '\u{21FE}' // ⇾ RIGHTWARDS OPEN-HEADED ARROW
+            | '\u{21E2}' // ⇢ RIGHTWARDS DASHED ARROW
+            | '\u{21E8}' // ⇨ RIGHTWARDS WHITE ARROW
+            | '\u{27A1}' // ➡ BLACK RIGHTWARDS ARROW
+        )
+    }
+
+    /// Find the first Unicode arrow in a string, returning its byte position and UTF-8 length.
+    fn find_arrow(s: &str) -> Option<(usize, usize)> {
+        for (byte_idx, ch) in s.char_indices() {
+            if Self::is_arrow_char(ch) {
+                return Some((byte_idx, ch.len_utf8()));
+            }
+        }
+        None
+    }
+
+    /// Parse textbook notation grammar format:
+    ///
+    /// ```text
+    /// S → if ( E ) S else S
+    /// S → if ( E ) S
+    /// S → other
+    /// E → condition
+    /// ```
+    ///
+    /// Also supports: ->, ::=, and | for alternatives:
+    /// ```text
+    /// S -> if ( E ) S else S | if ( E ) S | other
+    /// E -> condition
+    /// ```
+    fn parse_textbook(&mut self) -> Result<Grammar> {
+        use std::collections::HashSet;
+
+        let input = self.input.to_string();
+        let mut rules: Vec<(String, Vec<String>)> = Vec::new();
+        let mut lhs_set: HashSet<String> = HashSet::new();
+        let mut all_rhs_symbols: Vec<String> = Vec::new();
+        let mut literal_map: HashMap<String, String> = HashMap::new();
+
+        // First pass: collect all rules and identify LHS symbols
+        let mut current_lhs: Option<String> = None;
+
+        for (line_num, line) in input.lines().enumerate() {
+            let trimmed = line.trim();
+
+            // Skip empty lines and comments
+            if trimmed.is_empty()
+                || trimmed.starts_with("//")
+                || trimmed.starts_with("#")
+                || trimmed.starts_with("/*")
+            {
+                continue;
+            }
+
+            // Try to split on arrow: any Unicode arrow, ->, or ::=
+            let (lhs_part, rhs_part) = if let Some((idx, arrow_len)) = Self::find_arrow(trimmed) {
+                let lhs = trimmed[..idx].trim();
+                let rhs = trimmed[idx + arrow_len..].trim();
+                (Some(lhs.to_string()), rhs.to_string())
+            } else if let Some(idx) = trimmed.find("::=") {
+                let lhs = trimmed[..idx].trim();
+                let rhs = trimmed[idx + 3..].trim();
+                (Some(lhs.to_string()), rhs.to_string())
+            } else if let Some(idx) = trimmed.find("->") {
+                let lhs = trimmed[..idx].trim();
+                let rhs = trimmed[idx + 2..].trim();
+                (Some(lhs.to_string()), rhs.to_string())
+            } else if trimmed.starts_with('|') {
+                // Continuation alternative for the previous LHS
+                let rhs = trimmed[1..].trim();
+                (None, rhs.to_string())
+            } else {
+                // Try colon notation: LHS : RHS (but only if no Bison %% markers)
+                if let Some(idx) = trimmed.find(':') {
+                    let lhs = trimmed[..idx].trim();
+                    let rhs = trimmed[idx + 1..].trim();
+                    // Only treat as a rule if LHS looks like a single identifier
+                    if !lhs.is_empty()
+                        && lhs.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\'')
+                    {
+                        (Some(lhs.to_string()), rhs.to_string())
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            };
+
+            // Update current LHS if we got one (uppercase for consistency)
+            if let Some(ref lhs) = lhs_part {
+                if lhs.is_empty() {
+                    return Err(Error::GrammarError {
+                        line: line_num + 1,
+                        message: "Empty left-hand side in rule".to_string(),
+                    });
+                }
+                let lhs_upper = lhs.to_uppercase();
+                current_lhs = Some(lhs_upper.clone());
+                lhs_set.insert(lhs_upper);
+            }
+
+            let active_lhs = match &current_lhs {
+                Some(l) => l.clone(),
+                None => {
+                    return Err(Error::GrammarError {
+                        line: line_num + 1,
+                        message: "Rule alternative '|' without a preceding rule".to_string(),
+                    });
+                }
+            };
+
+            // Split RHS on | for alternatives
+            let alternatives: Vec<&str> = rhs_part.split('|').collect();
+            for alt in alternatives {
+                let alt = alt.trim();
+                if alt.is_empty() {
+                    // Empty alternative = epsilon production
+                    rules.push((active_lhs.clone(), Vec::new()));
+                    continue;
+                }
+
+                // Tokenize the RHS: split on whitespace, but handle quoted strings
+                let raw_symbols = Self::tokenize_textbook_rhs(alt);
+                let symbols: Vec<String> = raw_symbols
+                    .iter()
+                    .map(|s| {
+                        // Normalize single-char punctuation to token names
+                        // so grammar and lexer agree on terminal names
+                        if s.len() == 1 && !s.chars().next().unwrap().is_alphanumeric() {
+                            let name = token_name_for(s);
+                            // Record original literal for lexer generation
+                            literal_map.insert(name.clone(), s.clone());
+                            name
+                        } else {
+                            // Lowercase keywords: record the original for lexer matching
+                            let upper = s.to_uppercase();
+                            if upper != *s {
+                                literal_map.insert(upper.clone(), s.clone());
+                            }
+                            upper
+                        }
+                    })
+                    .collect();
+                for sym in &symbols {
+                    all_rhs_symbols.push(sym.clone());
+                }
+                rules.push((active_lhs.clone(), symbols));
+            }
+        }
+
+        if rules.is_empty() {
+            return Err(Error::GrammarError {
+                line: 0,
+                message: "No grammar rules found. Use notation like: S → a B c".to_string(),
+            });
+        }
+
+        // Second pass: classify symbols (Bison-style, as in symtab.c)
+        // Symbols appearing as LHS → nonterminal
+        // Everything else → terminal (auto-declared)
+        let mut tokens: Vec<String> = Vec::new();
+        let mut token_set: HashSet<String> = HashSet::new();
+
+        for sym in &all_rhs_symbols {
+            if !lhs_set.contains(sym) && token_set.insert(sym.clone()) {
+                tokens.push(sym.clone());
+            }
+        }
+
+        // Build the Grammar
+        self.grammar.tokens = tokens;
+        self.grammar.token_literals = literal_map;
+        self.grammar.start_symbol = rules[0].0.clone();
+
+        for (lhs, rhs_syms) in &rules {
+            let rhs: Vec<Symbol> = rhs_syms
+                .iter()
+                .map(|s| {
+                    if lhs_set.contains(s) {
+                        Symbol::NonTerminal(s.clone())
+                    } else {
+                        Symbol::Terminal(s.clone())
+                    }
+                })
+                .collect();
+
+            self.grammar.rules.push(Rule {
+                lhs: lhs.clone(),
+                rhs,
+                action: None,
+                precedence_sym: None,
+            });
+        }
+
+        Ok(self.grammar.clone())
+    }
+
+    /// Tokenize a textbook RHS string into individual symbols.
+    /// Handles:
+    ///   - Whitespace-separated identifiers: `if ( E ) S else S`
+    ///   - Quoted literals: `'if'`, `"+"`, `'('`
+    ///   - Single punctuation characters treated as individual tokens
+    fn tokenize_textbook_rhs(rhs: &str) -> Vec<String> {
+        let mut symbols = Vec::new();
+        let mut chars = rhs.chars().peekable();
+
+        while let Some(&ch) = chars.peek() {
+            // Skip whitespace
+            if ch.is_whitespace() {
+                chars.next();
+                continue;
+            }
+
+            // Quoted literal: 'x' or "x"
+            if ch == '\'' || ch == '"' {
+                let quote = ch;
+                chars.next(); // consume opening quote
+                let mut lit = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == quote {
+                        chars.next(); // consume closing quote
+                        break;
+                    }
+                    lit.push(c);
+                    chars.next();
+                }
+                if !lit.is_empty() {
+                    symbols.push(lit);
+                }
+                continue;
+            }
+
+            // Identifier: alphanumeric or underscore (also allow ' for primed symbols like E')
+            if ch.is_alphanumeric() || ch == '_' {
+                let mut ident = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_alphanumeric() || c == '_' || c == '\'' {
+                        ident.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                symbols.push(ident);
+                continue;
+            }
+
+            // ε or epsilon → skip (empty production marker)
+            if ch == '\u{03B5}' {
+                chars.next();
+                continue;
+            }
+
+            // Single punctuation character → treat as a terminal symbol
+            // Map common punctuation to token names for compatibility
+            chars.next();
+            symbols.push(ch.to_string());
+        }
+
+        symbols
+    }
+
+    // =========================================================================
+    // Lexer misdetection guard
+    // =========================================================================
 
     /// Validates that the input is not a lexer specification (.l file).
     /// Detects common patterns that indicate a lexer file was pasted instead of grammar rules.
@@ -836,5 +1273,43 @@ impl<'a> GrammarParser<'a> {
         }
 
         Ok(())
+    }
+}
+
+/// Convert a token string to an uppercase token name suitable for use in
+/// generated lexer/parser code. Single-character punctuation gets a
+/// descriptive name (like Bison does), identifiers get uppercased.
+fn token_name_for(token: &str) -> String {
+    if token.len() == 1 {
+        match token.chars().next().unwrap() {
+            '(' => "LPAREN".to_string(),
+            ')' => "RPAREN".to_string(),
+            '[' => "LBRACKET".to_string(),
+            ']' => "RBRACKET".to_string(),
+            '{' => "LBRACE".to_string(),
+            '}' => "RBRACE".to_string(),
+            '+' => "PLUS".to_string(),
+            '-' => "MINUS".to_string(),
+            '*' => "TIMES".to_string(),
+            '/' => "DIVIDE".to_string(),
+            '=' => "EQUALS".to_string(),
+            '<' => "LT".to_string(),
+            '>' => "GT".to_string(),
+            ',' => "COMMA".to_string(),
+            ';' => "SEMICOLON".to_string(),
+            '.' => "DOT".to_string(),
+            ':' => "COLON".to_string(),
+            '!' => "BANG".to_string(),
+            '&' => "AMP".to_string(),
+            '^' => "CARET".to_string(),
+            '%' => "PERCENT".to_string(),
+            '~' => "TILDE".to_string(),
+            '#' => "HASH".to_string(),
+            '@' => "AT".to_string(),
+            '?' => "QUESTION".to_string(),
+            c => format!("CHAR_{}", c as u32),
+        }
+    } else {
+        token.to_uppercase()
     }
 }

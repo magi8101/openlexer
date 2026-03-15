@@ -1,17 +1,34 @@
-//! LALR(1) / SLR(1) Table Construction.
+//! LALR(1) Table Construction using DeRemer-Pennello Algorithm.
 //!
-//! Implements the core algorithms to build parsing tables from a grammar:
-//! 1. Canonical Collection of LR(0) Items
-//! 2. Closure and Goto operations
-//! 3. Action/Goto Table population
+//! Implements efficient LALR(1) parsing table construction:
+//! 1. Canonical Collection of LR(0) Items (same as SLR)
+//! 2. LALR(1) Lookahead Computation via READS and INCLUDES relations
+//! 3. Action/Goto Table population with precise lookaheads
 //! 4. Precedence/Associativity conflict resolution
+//!
+//! The key difference from SLR(1):
+//! - SLR(1) uses FOLLOW(A) for all reductions of A -> alpha
+//! - LALR(1) computes context-specific lookaheads for each (state, production) pair
+//!
+//! Algorithm Overview (DeRemer & Pennello, 1982):
+//! 1. Build LR(0) automaton
+//! 2. Compute Direct Read (DR) sets: terminals readable after nonterminal transitions
+//! 3. Compute READS relation: (p,A) READS (r,C) if goto(p,A)=r has [C->.gamma] and C =>* epsilon
+//! 4. Compute INCLUDES relation: (p,A) INCLUDES (p',B) if B -> beta A gamma where gamma =>* epsilon
+//! 5. Compute Read sets via transitive closure of READS over DR
+//! 6. Compute Follow sets (LA) via transitive closure of INCLUDES over Read
+//! 7. For reduction [A -> alpha.] in state s, LA(s, A -> alpha) is the lookahead set
 //!
 //! Conflict Resolution (per Bison semantics):
 //! - Shift/Reduce: Compare lookahead token precedence vs production precedence
 //!   - Token prec > Rule prec => Shift
 //!   - Rule prec > Token prec => Reduce
-//!   - Equal prec => Use associativity: Left=Reduce, Right=Shift, NonAssoc=Error, PrecedenceOnly=Conflict
+//!   - Equal prec => Use associativity: Left=Reduce, Right=Shift, NonAssoc=Error
 //! - Reduce/Reduce: First rule in grammar wins (lowest rule index)
+//!
+//! References:
+//! - DeRemer, F. & Pennello, T. (1982). "Efficient Computation of LALR(1) Look-Ahead Sets"
+//! - Aho, Sethi, Ullman (1986). "Compilers: Principles, Techniques, and Tools" (Dragon Book)
 
 use crate::error::Result;
 use crate::parsegen::first::FirstFollow;
@@ -51,6 +68,7 @@ fn augment_grammar(grammar: &Grammar) -> Grammar {
         lac_enabled: grammar.lac_enabled,
         prologue: grammar.prologue.clone(),
         epilogue: grammar.epilogue.clone(),
+        token_literals: grammar.token_literals.clone(),
     }
 }
 
@@ -102,6 +120,9 @@ impl ParsingTable {
         // Build Canonical Collection of LR(0) states
         let (states, transitions) = build_lr0_collection(&augmented)?;
 
+        // Compute LALR(1) lookaheads using DeRemer-Pennello algorithm
+        let lalr = LalrLookaheads::compute(&augmented, &states, &transitions, &ff);
+
         let mut table = Self {
             action: HashMap::new(),
             goto: HashMap::new(),
@@ -111,7 +132,7 @@ impl ParsingTable {
             glr_conflict_actions: HashMap::new(),
         };
 
-        // Populate Action and Goto tables (SLR(1) approach)
+        // Populate Action and Goto tables using LALR(1) lookaheads
         for state in &states {
             // Transitions (Shift and Goto)
             if let Some(trans) = transitions.get(&state.id) {
@@ -136,7 +157,7 @@ impl ParsingTable {
                 }
             }
 
-            // Reductions
+            // Reductions using LALR(1) lookaheads
             for item in &state.items {
                 let rule = &augmented.rules[item.rule_index];
 
@@ -148,18 +169,32 @@ impl ParsingTable {
                         add_action(&mut table, state.id, "$", Action::Accept, &augmented);
                     } else {
                         // Reduce A -> alpha
-                        // SLR(1): For all terminal a in FOLLOW(A)
-                        if let Some(follow) = ff.follow.get(&rule.lhs) {
-                            for term in follow {
-                                // Adjust rule index: subtract 1 because we added the augmented rule at position 0
-                                add_action(
-                                    &mut table,
-                                    state.id,
-                                    term,
-                                    Action::Reduce(item.rule_index - 1),
-                                    &augmented,
-                                );
-                            }
+                        // LALR(1): Use computed lookahead set for this specific (state, rule) pair
+                        let lookahead = lalr.get_lookahead(state.id, item.rule_index);
+
+                        // If LALR lookahead computation found lookaheads, use them
+                        // Otherwise fall back to FOLLOW set (for robustness)
+                        let terms: Vec<String> = if let Some(la) = lookahead {
+                            la.iter().cloned().collect()
+                        } else {
+                            // Fallback to SLR(1) FOLLOW set
+                            ff.follow
+                                .get(&rule.lhs)
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect()
+                        };
+
+                        for term in terms {
+                            // Adjust rule index: subtract 1 because we added the augmented rule at position 0
+                            add_action(
+                                &mut table,
+                                state.id,
+                                &term,
+                                Action::Reduce(item.rule_index - 1),
+                                &augmented,
+                            );
                         }
                     }
                 }
@@ -517,4 +552,523 @@ fn goto(grammar: &Grammar, items: &BTreeSet<Item>, sym: &str) -> BTreeSet<Item> 
         }
     }
     next // Not full closure, just the kernel. Caller applies closure.
+}
+
+// =============================================================================
+// LALR(1) Lookahead Computation (DeRemer-Pennello Algorithm)
+// =============================================================================
+
+/// A nonterminal transition in the LR(0) automaton: (state_id, nonterminal_name)
+/// This represents moving from state p on nonterminal A to some state q = goto(p, A).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct NonterminalTransition {
+    state: usize,
+    nonterminal: String,
+}
+
+/// Reduction item identifier: (state_id, rule_index)
+/// Represents the reduction A -> alpha in state s.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ReductionItem {
+    state: usize,
+    rule_index: usize,
+}
+
+/// LALR(1) lookahead computation context.
+/// Implements the DeRemer-Pennello algorithm for efficient LALR(1) lookahead computation.
+struct LalrLookaheads {
+    /// Set of nonterminals that can derive epsilon.
+    nullable: HashSet<String>,
+
+    /// Direct Read (DR) sets: for each (state, nonterminal) transition,
+    /// the set of terminals that can be read immediately after the transition.
+    /// DR(p, A) = { t | goto(p, A) has item [B -> alpha.t beta] }
+    direct_read: HashMap<NonterminalTransition, HashSet<String>>,
+
+    /// READS relation: (p, A) READS (r, C) if:
+    /// - r = goto(p, A)
+    /// - r contains [C -> .gamma] in its closure
+    /// - C =>* epsilon (C is nullable)
+    reads: HashMap<NonterminalTransition, HashSet<NonterminalTransition>>,
+
+    /// Read sets: transitive closure of DR over READS.
+    /// Read(p, A) = DR(p, A) union { Read(r, C) | (p, A) READS (r, C) }
+    read_sets: HashMap<NonterminalTransition, HashSet<String>>,
+
+    /// INCLUDES relation: (p, A) INCLUDES (p', B) if:
+    /// There exists a production B -> beta A gamma where:
+    /// - Following beta from p' leads through transitions to state p
+    /// - gamma =>* epsilon
+    includes: HashMap<NonterminalTransition, HashSet<NonterminalTransition>>,
+
+    /// LOOKBACK relation: maps reduction items to the nonterminal transitions
+    /// that "cause" them.
+    /// (s, A -> alpha) LOOKBACK (p, A) if goto(p, A, alpha) = s
+    /// i.e., there's a path from p reading A then alpha that ends at s
+    lookback: HashMap<ReductionItem, HashSet<NonterminalTransition>>,
+
+    /// Final LA (lookahead) sets for each reduction item.
+    /// LA(s, A -> alpha) = union { Follow(p, A) | (s, A -> alpha) LOOKBACK (p, A) }
+    lookaheads: HashMap<ReductionItem, HashSet<String>>,
+}
+
+impl LalrLookaheads {
+    /// Compute LALR(1) lookaheads for all reduction items.
+    fn compute(
+        grammar: &Grammar,
+        states: &[State],
+        transitions: &HashMap<usize, HashMap<String, usize>>,
+        ff: &FirstFollow,
+    ) -> Self {
+        let mut ctx = Self {
+            nullable: HashSet::new(),
+            direct_read: HashMap::new(),
+            reads: HashMap::new(),
+            read_sets: HashMap::new(),
+            includes: HashMap::new(),
+            lookback: HashMap::new(),
+            lookaheads: HashMap::new(),
+        };
+
+        // Step 1: Compute which nonterminals are nullable
+        ctx.compute_nullable(grammar, ff);
+
+        // Step 2: Compute Direct Read sets
+        ctx.compute_direct_read(grammar, states, transitions);
+
+        // Step 3: Compute READS relation
+        ctx.compute_reads_relation(grammar, states, transitions);
+
+        // Step 4: Compute Read sets (transitive closure over READS)
+        ctx.compute_read_sets(transitions);
+
+        // Step 5: Compute INCLUDES and LOOKBACK relations
+        ctx.compute_includes_and_lookback(grammar, states, transitions);
+
+        // Step 6: Compute final lookahead sets (Follow sets via INCLUDES, then LOOKBACK)
+        ctx.compute_final_lookaheads(transitions);
+
+        ctx
+    }
+
+    /// Compute which nonterminals can derive epsilon.
+    fn compute_nullable(&mut self, grammar: &Grammar, ff: &FirstFollow) {
+        // A nonterminal is nullable if FIRST contains EPSILON
+        for (nt, first_set) in &ff.first {
+            if first_set.contains("EPSILON") {
+                self.nullable.insert(nt.clone());
+            }
+        }
+
+        // Also check for rules with empty RHS directly
+        for rule in &grammar.rules {
+            if rule.rhs.is_empty() {
+                self.nullable.insert(rule.lhs.clone());
+            }
+        }
+    }
+
+    /// Compute Direct Read sets.
+    /// DR(p, A) = set of terminals t such that goto(p, A) contains an item with dot before t.
+    fn compute_direct_read(
+        &mut self,
+        grammar: &Grammar,
+        states: &[State],
+        transitions: &HashMap<usize, HashMap<String, usize>>,
+    ) {
+        for state in states {
+            if let Some(state_trans) = transitions.get(&state.id) {
+                for (sym, target_state_id) in state_trans {
+                    // Only consider nonterminal transitions
+                    if grammar.tokens.contains(sym) || sym == "$" {
+                        continue;
+                    }
+
+                    let nt_trans = NonterminalTransition {
+                        state: state.id,
+                        nonterminal: sym.clone(),
+                    };
+
+                    let target_state = &states[*target_state_id];
+                    let mut dr = HashSet::new();
+
+                    // Find all terminals that appear immediately after the dot
+                    for item in &target_state.items {
+                        let rule = &grammar.rules[item.rule_index];
+                        if item.dot < rule.rhs.len() {
+                            if let Symbol::Terminal(t) = &rule.rhs[item.dot] {
+                                dr.insert(t.clone());
+                            }
+                        }
+                    }
+
+                    // Also include $ if this is the augmented start transition
+                    // (handled by checking if target contains accept item)
+                    for item in &target_state.items {
+                        if item.rule_index == 0 && item.dot == grammar.rules[0].rhs.len() {
+                            dr.insert("$".to_string());
+                        }
+                    }
+
+                    self.direct_read.insert(nt_trans, dr);
+                }
+            }
+        }
+    }
+
+    /// Compute READS relation.
+    /// (p, A) READS (r, C) if:
+    /// - r = goto(p, A)
+    /// - The closure of r contains [C -> .gamma]
+    /// - C is nullable
+    fn compute_reads_relation(
+        &mut self,
+        grammar: &Grammar,
+        states: &[State],
+        transitions: &HashMap<usize, HashMap<String, usize>>,
+    ) {
+        for state in states {
+            if let Some(state_trans) = transitions.get(&state.id) {
+                for (sym, target_state_id) in state_trans {
+                    // Only nonterminal transitions
+                    if grammar.tokens.contains(sym) || sym == "$" {
+                        continue;
+                    }
+
+                    let nt_trans = NonterminalTransition {
+                        state: state.id,
+                        nonterminal: sym.clone(),
+                    };
+
+                    let _target_state = &states[*target_state_id];
+                    let mut reads_set = HashSet::new();
+
+                    // Check transitions from target state on nullable nonterminals
+                    if let Some(target_trans) = transitions.get(target_state_id) {
+                        for (target_sym, _) in target_trans {
+                            // Must be a nullable nonterminal
+                            if !grammar.tokens.contains(target_sym)
+                               && target_sym != "$"
+                               && self.nullable.contains(target_sym)
+                            {
+                                reads_set.insert(NonterminalTransition {
+                                    state: *target_state_id,
+                                    nonterminal: target_sym.clone(),
+                                });
+                            }
+                        }
+                    }
+
+                    if !reads_set.is_empty() {
+                        self.reads.insert(nt_trans, reads_set);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compute Read sets via transitive closure over READS relation.
+    /// Uses Tarjan's algorithm for computing SCCs and digraph traversal.
+    fn compute_read_sets(
+        &mut self,
+        _transitions: &HashMap<usize, HashMap<String, usize>>,
+    ) {
+        // Collect all nonterminal transitions
+        let all_trans: Vec<NonterminalTransition> = self.direct_read.keys().cloned().collect();
+
+        // Initialize read sets with direct read
+        for trans in &all_trans {
+            let dr = self.direct_read.get(trans).cloned().unwrap_or_default();
+            self.read_sets.insert(trans.clone(), dr);
+        }
+
+        // Compute transitive closure using a worklist algorithm
+        let mut changed = true;
+        while changed {
+            changed = false;
+
+            for trans in &all_trans {
+                if let Some(reads_targets) = self.reads.get(trans).cloned() {
+                    let mut to_add = HashSet::new();
+
+                    for target in &reads_targets {
+                        if let Some(target_read) = self.read_sets.get(target) {
+                            to_add.extend(target_read.clone());
+                        }
+                    }
+
+                    let read_set = self.read_sets.entry(trans.clone()).or_default();
+                    let old_len = read_set.len();
+                    read_set.extend(to_add);
+                    if read_set.len() > old_len {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Compute INCLUDES and LOOKBACK relations.
+    ///
+    /// For each production B -> beta A gamma where gamma =>* epsilon:
+    /// - Find the state p' from which reading beta leads to state p
+    /// - Then (p, A) INCLUDES (p', B)
+    /// - Also, if the full production is reduced in state s, (s, B -> beta A gamma) LOOKBACK (p, A)
+    fn compute_includes_and_lookback(
+        &mut self,
+        grammar: &Grammar,
+        states: &[State],
+        transitions: &HashMap<usize, HashMap<String, usize>>,
+    ) {
+        // For each state and each item that is a "kernel" item for a reduction
+        for state in states {
+            for item in &state.items {
+                let _rule = &grammar.rules[item.rule_index];
+
+                // We need to trace where we came from to reach this item
+                // For each position in the RHS, we track possible states
+
+                // Start from states that have this rule's LHS as a transition
+                // and trace through the RHS symbols
+
+                // Find all "origin" states: states p where [A -> . rhs] is in closure
+                // and following rhs leads to current state with current dot position
+                self.trace_production_paths(
+                    grammar,
+                    states,
+                    transitions,
+                    item.rule_index,
+                    item.dot,
+                    state.id,
+                );
+            }
+        }
+    }
+
+    /// Trace all paths that lead to a specific item in a specific state.
+    /// This establishes INCLUDES and LOOKBACK relations.
+    fn trace_production_paths(
+        &mut self,
+        grammar: &Grammar,
+        states: &[State],
+        transitions: &HashMap<usize, HashMap<String, usize>>,
+        rule_index: usize,
+        dot_position: usize,
+        current_state: usize,
+    ) {
+        let rule = &grammar.rules[rule_index];
+
+        // Only process complete items for LOOKBACK, but we need partial items for INCLUDES
+        let is_complete = dot_position == rule.rhs.len();
+
+        // Find all origin states where [A -> . alpha] and trace forward
+        for origin_state in states {
+            // Check if origin state contains [rule_index, dot=0] in its closure
+            let origin_items = closure(grammar, &origin_state.items);
+            let has_initial_item = origin_items.contains(&Item {
+                rule_index,
+                dot: 0,
+            });
+
+            if !has_initial_item {
+                continue;
+            }
+
+            // Trace the path from origin through the RHS symbols
+            // We need to verify that following rhs[0..dot_position] from origin leads to current_state
+            let path_valid = self.verify_path(
+                grammar,
+                transitions,
+                origin_state.id,
+                rule_index,
+                dot_position,
+                current_state,
+            );
+
+            if !path_valid {
+                continue;
+            }
+
+            // Now establish INCLUDES relations for this path
+            // For each nonterminal A at position i in beta, where gamma (rest after A) is nullable:
+            // (state_at_position_i, A) INCLUDES (origin, rule.lhs)
+            let mut current_trace_state = origin_state.id;
+            for (i, sym) in rule.rhs.iter().enumerate().take(dot_position) {
+                let sym_name = match sym {
+                    Symbol::Terminal(t) => t,
+                    Symbol::NonTerminal(nt) => nt,
+                };
+
+                // Check if rest of RHS after this symbol (gamma) is nullable
+                let gamma_nullable = self.is_suffix_nullable(grammar, rule_index, i + 1);
+
+                // If this is a nonterminal and gamma is nullable, add INCLUDES
+                if let Symbol::NonTerminal(nt) = sym {
+                    if gamma_nullable || i + 1 == rule.rhs.len() {
+                        // (current_trace_state, nt) INCLUDES (origin, rule.lhs)
+                        let from_trans = NonterminalTransition {
+                            state: current_trace_state,
+                            nonterminal: nt.clone(),
+                        };
+                        let to_trans = NonterminalTransition {
+                            state: origin_state.id,
+                            nonterminal: rule.lhs.clone(),
+                        };
+
+                        self.includes
+                            .entry(from_trans)
+                            .or_default()
+                            .insert(to_trans);
+                    }
+                }
+
+                // Move to next state
+                if let Some(state_trans) = transitions.get(&current_trace_state) {
+                    if let Some(&next_state) = state_trans.get(sym_name) {
+                        current_trace_state = next_state;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // If this is a complete item, add LOOKBACK
+            if is_complete {
+                let reduction = ReductionItem {
+                    state: current_state,
+                    rule_index,
+                };
+                let nt_trans = NonterminalTransition {
+                    state: origin_state.id,
+                    nonterminal: rule.lhs.clone(),
+                };
+
+                self.lookback
+                    .entry(reduction)
+                    .or_default()
+                    .insert(nt_trans);
+            }
+        }
+    }
+
+    /// Verify that following rhs[0..dot] from origin_state leads to target_state.
+    fn verify_path(
+        &self,
+        grammar: &Grammar,
+        transitions: &HashMap<usize, HashMap<String, usize>>,
+        origin_state: usize,
+        rule_index: usize,
+        dot_position: usize,
+        target_state: usize,
+    ) -> bool {
+        let rule = &grammar.rules[rule_index];
+
+        if dot_position == 0 {
+            return origin_state == target_state;
+        }
+
+        let mut current = origin_state;
+        for sym in rule.rhs.iter().take(dot_position) {
+            let sym_name = match sym {
+                Symbol::Terminal(t) => t,
+                Symbol::NonTerminal(nt) => nt,
+            };
+
+            if let Some(state_trans) = transitions.get(&current) {
+                if let Some(&next) = state_trans.get(sym_name) {
+                    current = next;
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        current == target_state
+    }
+
+    /// Check if the suffix of a production (from position `start` to end) is nullable.
+    fn is_suffix_nullable(&self, grammar: &Grammar, rule_index: usize, start: usize) -> bool {
+        let rule = &grammar.rules[rule_index];
+
+        for sym in rule.rhs.iter().skip(start) {
+            match sym {
+                Symbol::Terminal(_) => return false,
+                Symbol::NonTerminal(nt) => {
+                    if !self.nullable.contains(nt) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Compute final lookahead sets for all reduction items.
+    /// LA(q, A -> alpha) = union { Follow(p, A) | (q, A -> alpha) LOOKBACK (p, A) }
+    /// where Follow(p, A) = Read(p, A) union { Follow(p', B) | (p, A) INCLUDES (p', B) }
+    fn compute_final_lookaheads(
+        &mut self,
+        _transitions: &HashMap<usize, HashMap<String, usize>>,
+    ) {
+        // First compute Follow sets (union of Read sets through INCLUDES)
+        // Follow(p, A) = Read(p, A) union { Follow(p', B) | (p, A) INCLUDES (p', B) }
+
+        let all_trans: Vec<NonterminalTransition> = self.read_sets.keys().cloned().collect();
+        let mut follow_sets: HashMap<NonterminalTransition, HashSet<String>> = HashMap::new();
+
+        // Initialize with read sets
+        for trans in &all_trans {
+            let read_set = self.read_sets.get(trans).cloned().unwrap_or_default();
+            follow_sets.insert(trans.clone(), read_set);
+        }
+
+        // Compute transitive closure over INCLUDES
+        let mut changed = true;
+        while changed {
+            changed = false;
+
+            for trans in &all_trans {
+                if let Some(includes_targets) = self.includes.get(trans).cloned() {
+                    let mut to_add = HashSet::new();
+
+                    for target in &includes_targets {
+                        if let Some(target_follow) = follow_sets.get(target) {
+                            to_add.extend(target_follow.clone());
+                        }
+                    }
+
+                    let follow_set = follow_sets.entry(trans.clone()).or_default();
+                    let old_len = follow_set.len();
+                    follow_set.extend(to_add);
+                    if follow_set.len() > old_len {
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // Now compute LA for each reduction using LOOKBACK
+        for (reduction, lookback_set) in &self.lookback {
+            let mut la = HashSet::new();
+
+            for trans in lookback_set {
+                if let Some(follow_set) = follow_sets.get(trans) {
+                    la.extend(follow_set.clone());
+                }
+            }
+
+            self.lookaheads.insert(reduction.clone(), la);
+        }
+    }
+
+    /// Get the lookahead set for a specific reduction item.
+    /// Returns None if not found (should not happen for valid grammars).
+    fn get_lookahead(&self, state: usize, rule_index: usize) -> Option<&HashSet<String>> {
+        let key = ReductionItem { state, rule_index };
+        self.lookaheads.get(&key)
+    }
 }

@@ -427,10 +427,10 @@ impl OpenLexerApp {
             lexer_sub_tab: LexerSubTab::default(),
             parser_sub_tab: ParserSubTab::default(),
             language: TargetLanguage::default(),
-            lexer_input: SAMPLE_LEXER.to_string(),
+            lexer_input: String::new(),
             lexer_output: String::new(),
             lexer_options: LexerOptions::default(),
-            parser_input: SAMPLE_PARSER.to_string(),
+            parser_input: String::new(),
             parser_output: String::new(),
             parser_options: ParserOptions::default(),
             try_code: String::new(),
@@ -911,9 +911,13 @@ impl OpenLexerApp {
                 if ui.button("Clear").clicked() {
                     self.lexer_input.clear();
                 }
-                if ui.button("Load Example").clicked() {
+                if ui.button("Load Advanced").clicked() {
                     self.lexer_input = SAMPLE_LEXER_ADVANCED.to_string();
                     self.log(LogLevel::Info, "Loaded advanced lexer example");
+                }
+                if ui.button("Load Sample").clicked() {
+                    self.lexer_input = SAMPLE_LEXER.to_string();
+                    self.log(LogLevel::Info, "Loaded basic lexer sample");
                 }
                 if ui.button("Generate").clicked() {
                     self.generate_lexer();
@@ -1122,6 +1126,10 @@ impl OpenLexerApp {
                     self.parser_input = SAMPLE_PARSER_AMBIGUOUS.to_string();
                     self.parser_options.mode = ParserMode::GLR;
                     self.log(LogLevel::Info, "Loaded ambiguous grammar for GLR");
+                }
+                if ui.button("Load Sample").clicked() {
+                    self.parser_input = SAMPLE_PARSER.to_string();
+                    self.log(LogLevel::Info, "Loaded basic grammar sample");
                 }
                 if ui.button("Generate").clicked() {
                     self.generate_parser();
