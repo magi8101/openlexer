@@ -852,9 +852,10 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("    public int parse(Lexer lexer) {\n");
     code.push_str("        this.defaultLexer = lexer;\n");
     code.push_str("        Stack<Integer> stack = new Stack<>();\n");
-    code.push_str("        Stack<Integer> valueStack = new Stack<>();\n");
+    code.push_str("        Stack<YYSTYPE> valueStack = new Stack<>();\n");
     code.push_str("        stack.push(0);\n");
-    code.push_str("        valueStack.push(0);\n");
+    code.push_str("        YYSTYPE initVal = new YYSTYPE();\n");
+    code.push_str("        valueStack.push(initVal);\n");
     code.push_str("        Token token = lexer.nextToken();\n");
     code.push_str("        String sym = token.type;\n");
     code.push_str("        \n");
@@ -876,13 +877,13 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("                String lhs = getLhs(ruleId);\n");
     code.push_str("                \n");
     code.push_str("                // Get values from stack for semantic action\n");
-    code.push_str("                int[] vals = new int[len];\n");
+    code.push_str("                YYSTYPE[] vals = new YYSTYPE[len];\n");
     code.push_str("                for (int i = len - 1; i >= 0; i--) {\n");
     code.push_str("                    vals[i] = valueStack.peek();\n");
     code.push_str("                    valueStack.pop();\n");
     code.push_str("                    stack.pop();\n");
     code.push_str("                }\n");
-    code.push_str("                int result = (len > 0) ? vals[0] : 0;\n");
+    code.push_str("                YYSTYPE result = new YYSTYPE();\n");
     code.push_str("                \n");
     code.push_str("                // Semantic Actions\n");
     code.push_str("                switch (ruleId) {\n");
@@ -906,7 +907,7 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("                    valueStack.push(result);\n");
     code.push_str("                }\n");
     code.push_str("            } else if (act.type == 'A') {\n");
-    code.push_str("                return valueStack.peek();\n");
+    code.push_str("                return (int)valueStack.peek().dval;\n");
     code.push_str("            }\n");
     code.push_str("        }\n");
     code.push_str("    }\n");
@@ -918,17 +919,19 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("    \n");
     code.push_str("    public static class Token {\n");
     code.push_str("        public String type;\n");
-    code.push_str("        public int value;\n");
+    code.push_str("        public YYSTYPE value;\n");
     code.push_str("        public String text;\n");
-    code.push_str("        public Token(String type, int value) {\n");
+    code.push_str("        public Token(String type, double dval) {\n");
     code.push_str("            this.type = type;\n");
-    code.push_str("            this.value = value;\n");
-    code.push_str("            this.text = String.valueOf(value);\n");
+    code.push_str("            this.value = new YYSTYPE();\n");
+    code.push_str("            this.value.dval = dval;\n");
+    code.push_str("            this.text = String.valueOf(dval);\n");
     code.push_str("        }\n");
     code.push_str("        public Token(String type, String text) {\n");
     code.push_str("            this.type = type;\n");
+    code.push_str("            this.value = new YYSTYPE();\n");
+    code.push_str("            try { this.value.dval = Double.parseDouble(text); } catch (Exception e) { this.value.dval = 0.0; }\n");
     code.push_str("            this.text = text;\n");
-    code.push_str("            try { this.value = Integer.parseInt(text); } catch (Exception e) { this.value = 0; }\n");
     code.push_str("        }\n");
     code.push_str("    }\n");
     code.push_str("    \n");
@@ -1066,7 +1069,8 @@ fn generate_java_parser_test_driver() -> String {
 }
 
 /// Translate Bison-style semantic action to Java.
-/// Converts $$ to result, $1/$2/etc to vals[0]/vals[1]/etc.
+/// Converts $$ to result.dval, $1/$2/etc to vals[0].dval/vals[1].dval/etc.
+/// Also handles non-standard `result` variable references used in some grammars.
 fn translate_action_java(action: &str, rhs_len: usize) -> String {
     let mut out = String::new();
     let chars: Vec<char> = action.chars().collect();
@@ -1075,7 +1079,7 @@ fn translate_action_java(action: &str, rhs_len: usize) -> String {
     while i < chars.len() {
         if chars[i] == '$' && i + 1 < chars.len() {
             if chars[i + 1] == '$' {
-                out.push_str("result");
+                out.push_str("result.dval");
                 i += 2;
             } else if chars[i + 1].is_ascii_digit() {
                 let mut j = i + 1;
@@ -1085,9 +1089,9 @@ fn translate_action_java(action: &str, rhs_len: usize) -> String {
                 let num_str: String = chars[i + 1..j].iter().collect();
                 if let Ok(n) = num_str.parse::<usize>() {
                     if n > 0 && n <= rhs_len {
-                        out.push_str(&format!("vals[{}]", n - 1));
+                        out.push_str(&format!("vals[{}].dval", n - 1));
                     } else {
-                        out.push_str("0"); // Invalid reference
+                        out.push_str("0");
                     }
                 }
                 i = j;
@@ -1101,12 +1105,54 @@ fn translate_action_java(action: &str, rhs_len: usize) -> String {
         }
     }
 
+    // Handle non-standard `result` variable (used in some grammars as global)
+    // Replace "result" with "result.dval" using word boundary checks
+    // Avoid replacing "result" if it's already part of "result.dval"
+    let mut result_out = String::new();
+    let out_chars: Vec<char> = out.chars().collect();
+    let mut i = 0;
+    while i < out_chars.len() {
+        if i + 6 <= out_chars.len()
+            && out_chars[i..i+6] == ['r', 'e', 's', 'u', 'l', 't']
+            && (i == 0 || (!out_chars[i-1].is_alphanumeric() && out_chars[i-1] != '.'))
+            && (i + 6 >= out_chars.len() || (!out_chars[i+6].is_alphanumeric() && out_chars[i+6] != '.')) {
+            // Found standalone "result" word (not part of result.dval or identifier)
+            result_out.push_str("result.dval");
+            i += 6;
+        } else {
+            result_out.push(out_chars[i]);
+            i += 1;
+        }
+    }
+
+    let mut out = result_out;
+
     // Convert C patterns to Java
     out = out.replace("printf(", "System.out.printf(");
-    out = out.replace("pow(", "(int)Math.pow(");
+    out = out.replace("pow(", "Math.pow(");
 
-    // Remove C-specific tokens that have no Java equivalent
-    out = out.replace("yyerrok", "/* yyerrok */");
+    // Handle fmod - replace with % operator for modulo
+    // Simple approach for common case: fmod(x,y) becomes (x%y)
+    while let Some(pos) = out.find("fmod(") {
+        if let Some(close_paren) = out[pos..].find(')') {
+            let close_pos = pos + close_paren;
+            let func_call = &out[pos+5..close_pos];  // Everything between fmod( and )
+            if let Some(comma_pos) = func_call.find(',') {
+                let arg1 = &func_call[..comma_pos].trim();
+                let arg2 = &func_call[comma_pos+1..].trim();
+                let replacement = format!("({} % {})", arg1, arg2);
+                out.replace_range(pos..close_pos+1, &replacement);
+            } else {
+                break;  // Not standard fmod(x,y) format, skip
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Remove C-specific tokens
+    let out = out.replace("yyerrok;", "");
+    let out = out.replace("yyerror(", "// Error: ");
 
     out
 }
@@ -1360,12 +1406,17 @@ pub fn generate_python_parser_test_driver() -> String {
 }
 
 /// Translate Bison-style semantic action to Python.
-/// Converts $$ to result, $1/$2/etc to vals[0]/vals[1]/etc.
 fn translate_action_python(action: &str, rhs_len: usize) -> String {
+    // Complex C blocks can't auto-translate
+    if action.contains('{') || (action.contains("if ") && action.contains("else")) {
+        return "pass  # C code, manual translation needed".to_string();
+    }
+
     let mut out = String::new();
     let chars: Vec<char> = action.chars().collect();
     let mut i = 0;
 
+    // Pass 1: Replace $$ and $N
     while i < chars.len() {
         if chars[i] == '$' && i + 1 < chars.len() {
             if chars[i + 1] == '$' {
@@ -1381,7 +1432,7 @@ fn translate_action_python(action: &str, rhs_len: usize) -> String {
                     if n > 0 && n <= rhs_len {
                         out.push_str(&format!("vals[{}]", n - 1));
                     } else {
-                        out.push_str("None"); // Invalid reference
+                        out.push_str("None");
                     }
                 }
                 i = j;
@@ -1389,19 +1440,81 @@ fn translate_action_python(action: &str, rhs_len: usize) -> String {
                 out.push('$');
                 i += 1;
             }
-        } else if chars[i] == ';' {
-            // Skip semicolons (C statement terminator)
-            i += 1;
         } else {
             out.push(chars[i]);
             i += 1;
         }
     }
 
-    // Convert some common C patterns to Python
-    out = out.replace("printf(", "print(");
-    out = out.replace("%d", "{}");
-    out = out.replace("\\n", "");
+    // Pass 2: Convert printf to Python print
+    let mut py_code = String::new();
+    let out_chars: Vec<char> = out.chars().collect();
+    let mut j = 0;
 
-    out
+    while j < out_chars.len() {
+        if j + 6 < out_chars.len() && &out_chars[j..j+6] == ['p', 'r', 'i', 'n', 't', 'f'] {
+            let mut fmt_str = String::new();
+            let mut args = String::new();
+            let mut paren_depth = 0;
+
+            j += 6;
+
+            while j < out_chars.len() && out_chars[j] != '(' {
+                j += 1;
+            }
+            j += 1;
+
+            if out_chars[j] == '"' {
+                j += 1;
+                while j < out_chars.len() && out_chars[j] != '"' {
+                    if out_chars[j] == '%' && j + 1 < out_chars.len() {
+                        match out_chars[j + 1] {
+                            'd' | 'g' | 'f' | 'i' | 's' | 'x' | 'o' => {
+                                fmt_str.push_str("{}");
+                                j += 2;
+                            }
+                            '%' => {
+                                fmt_str.push('%');
+                                j += 2;
+                            }
+                            _ => {
+                                fmt_str.push(out_chars[j]);
+                                j += 1;
+                            }
+                        }
+                    } else {
+                        fmt_str.push(out_chars[j]);
+                        j += 1;
+                    }
+                }
+                j += 1;
+
+                if j < out_chars.len() && out_chars[j] == ',' {
+                    j += 1;
+                    while j < out_chars.len() && out_chars[j] == ' ' {
+                        j += 1;
+                    }
+
+                    while j < out_chars.len() && out_chars[j] != ')' {
+                        args.push(out_chars[j]);
+                        j += 1;
+                    }
+                }
+
+                py_code.push_str(&format!("print(\"{}\".format({}))", fmt_str, args.trim()));
+                if j < out_chars.len() && out_chars[j] == ')' {
+                    j += 1;
+                }
+            }
+        } else {
+            py_code.push(out_chars[j]);
+            j += 1;
+        }
+    }
+
+    let mut result = py_code.replace(");", ")");
+    result = result.replace("yyerror(\"", "# ");
+    result = result.replace("yyerror(", "# ");
+    result
 }
+
