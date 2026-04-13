@@ -148,43 +148,50 @@ impl Grammar {
         // Only include tokens that have explicit literals defined
         for token in &self.tokens {
             if let Some(literal) = self.token_literals.get(token) {
-                // Escape regex metacharacters in the literal
-                let escaped: String = literal.chars().map(|ch| {
-                    match ch {
-                        '(' | ')' | '[' | ']' | '{' | '}' | '.' | '*' | '+' | '?'
-                        | '\\' | '^' | '$' | '|' => format!("\\{}", ch),
-                        _ => ch.to_string(),
-                    }
-                }).collect();
+                // Escape regex metacharacters, but preserve escape sequences
+                let escaped = Self::escape_lexer_pattern(literal);
 
                 rules.push(format!(
-                    "\"{}\"    {{ return {}; }}",
+                    "{}    {{ return {}; }}",
                     escaped, token
                 ));
             }
         }
 
-        // Add TODO patterns for tokens without explicit literals
-        let has_pattern_tokens = self.tokens.iter().any(|t| {
-            !self.token_literals.contains_key(t) &&
-            t.chars().all(|c| c.is_uppercase() || c == '_')
-        });
+        // Add actual patterns for tokens without explicit literals
+        // But skip precedence-only symbols (they shouldn't appear in lexer)
+        let precedence_symbols = ["UMINUS", "PREC", "PPRIORITY"];
+        let tokens_without_literals: Vec<_> = self.tokens
+            .iter()
+            .filter(|t| {
+                !self.token_literals.contains_key(*t) &&
+                !precedence_symbols.contains(&t.as_str())
+            })
+            .collect();
 
-        if has_pattern_tokens {
-            rules.push("/* TODO: Define patterns for the following tokens: */".to_string());
-            for token in &self.tokens {
-                if !self.token_literals.contains_key(token) {
-                    // Suggest pattern based on token name conventions
-                    let pattern = match token.as_str() {
-                        "NUMBER" | "NUM" | "INTEGER" | "INT" | "FLOAT" | "DOUBLE" | "DECIMAL" => "[0-9]+",
-                        "IDENTIFIER" | "ID" | "NAME" | "VAR" => "[a-zA-Z_][a-zA-Z0-9_]*",
-                        "STRING" | "STR" => "\"([^\"\\\\]|\\\\.)*\"",
-                        _ if token.starts_with("NUM") => "[0-9]+",
-                        _ if token.starts_with("ID") || token.starts_with("NAME") => "[a-zA-Z_][a-zA-Z0-9_]*",
-                        _ => "[a-z]+",
-                    };
-                    rules.push(format!("/* {}    {{ return {}; }} */", pattern, token));
-                }
+        if !tokens_without_literals.is_empty() {
+            for token in tokens_without_literals {
+                // Generate pattern based on token name
+                let pattern = match token.as_str() {
+                    "NUMBER" | "NUM" | "INTEGER" | "INT" | "FLOAT" | "DOUBLE" | "DECIMAL" =>
+                        "[0-9]+",
+                    "IDENTIFIER" | "ID" | "NAME" | "VAR" =>
+                        "[a-zA-Z_][a-zA-Z0-9_]*",
+                    "STRING" | "STR" =>
+                        "\"([^\"\\\\]|\\\\.)*\"",
+                    "COMMENT" =>
+                        "//.*",
+                    _ if token.starts_with("NUM") => "[0-9]+",
+                    _ if token.starts_with("ID") || token.starts_with("NAME") =>
+                        "[a-zA-Z_][a-zA-Z0-9_]*",
+                    // Fallback for other tokens
+                    _ => "[a-zA-Z_][a-zA-Z0-9_]*",
+                };
+
+                rules.push(format!(
+                    "{}    {{ return {}; }}",
+                    pattern, token
+                ));
             }
         }
 
@@ -196,6 +203,52 @@ impl Grammar {
             "/* Auto-generated lexer for grammar */\n\n%%\n\n{}\n\n%%\n",
             rules.join("\n")
         )
+    }
+
+    /// Escape a pattern for Lex/Flex lexer spec
+    /// Preserves escape sequences like \n, \t but escapes regex metacharacters
+    fn escape_lexer_pattern(s: &str) -> String {
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+
+        // Quote the literal if it contains special chars, otherwise quote it minimally
+        result.push('"');
+
+        while let Some(ch) = chars.next() {
+            match ch {
+                // Escape sequences - preserve them as-is
+                '\\' if chars.peek() == Some(&'n') => {
+                    result.push_str("\\n");
+                    chars.next();
+                }
+                '\\' if chars.peek() == Some(&'t') => {
+                    result.push_str("\\t");
+                    chars.next();
+                }
+                '\\' if chars.peek() == Some(&'r') => {
+                    result.push_str("\\r");
+                    chars.next();
+                }
+                '\\' if chars.peek() == Some(&'\\') => {
+                    result.push_str("\\\\");
+                    chars.next();
+                }
+                // Regex metacharacters - escape them
+                '(' | ')' | '[' | ']' | '{' | '}' | '.' | '*' | '+' | '?'
+                | '^' | '$' | '|' => {
+                    result.push('\\');
+                    result.push(ch);
+                }
+                '"' => {
+                    result.push('\\');
+                    result.push('"');
+                }
+                _ => result.push(ch),
+            }
+        }
+
+        result.push('"');
+        result
     }
 
     /// Parses a grammar string.
