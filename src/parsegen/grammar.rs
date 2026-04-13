@@ -145,33 +145,39 @@ impl Grammar {
     pub fn generate_lexer_spec(&self) -> String {
         let mut rules = Vec::new();
 
+        // Only include tokens that have explicit literals defined
         for token in &self.tokens {
-            // Look up the original literal from token_literals map
-            let literal = self.token_literals.get(token).cloned().unwrap_or_else(|| token.clone());
+            if let Some(literal) = self.token_literals.get(token) {
+                // Escape regex metacharacters in the literal
+                let escaped: String = literal.chars().map(|ch| {
+                    match ch {
+                        '(' | ')' | '[' | ']' | '{' | '}' | '.' | '*' | '+' | '?'
+                        | '\\' | '^' | '$' | '|' => format!("\\{}", ch),
+                        _ => ch.to_string(),
+                    }
+                }).collect();
 
-            // Escape regex metacharacters in the literal
-            let escaped: String = literal.chars().map(|ch| {
-                match ch {
-                    '(' | ')' | '[' | ']' | '{' | '}' | '.' | '*' | '+' | '?'
-                    | '\\' | '^' | '$' | '|' => format!("\\{}", ch),
-                    _ => ch.to_string(),
-                }
-            }).collect();
-
-            rules.push(format!(
-                "\"{}\"    {{ return {}; }}",
-                escaped, token
-            ));
+                rules.push(format!(
+                    "\"{}\"    {{ return {}; }}",
+                    escaped, token
+                ));
+            }
         }
 
-        // Add identifier rule for any identifier-like terminals
-        let has_identifier_tokens = self.tokens.iter().any(|t| {
-            let lit = self.token_literals.get(t).cloned().unwrap_or_else(|| t.clone());
-            lit.chars().all(|c| c.is_alphabetic() || c == '_')
+        // Add identifier rule for any token-like identifiers
+        // (tokens without explicit literals that look like identifiers)
+        let has_pattern_tokens = self.tokens.iter().any(|t| {
+            !self.token_literals.contains_key(t) &&
+            t.chars().all(|c| c.is_uppercase() || c == '_')
         });
 
-        if has_identifier_tokens {
-            rules.push("[a-zA-Z_][a-zA-Z0-9_]*    { return IDENTIFIER; }".to_string());
+        if has_pattern_tokens {
+            rules.push("/* TODO: Define patterns for the following tokens: */".to_string());
+            for token in &self.tokens {
+                if !self.token_literals.contains_key(token) {
+                    rules.push(format!("/* [a-z]+    {{ return {}; }} */", token));
+                }
+            }
         }
 
         // Always add whitespace skip and catch-all
