@@ -622,6 +622,34 @@ impl OpenLexerApp {
                                 let line_count = code.lines().count();
                                 self.parser_output = code;
                                 self.auto_lexer_spec = grammar.generate_lexer_spec();
+
+                                // Also auto-generate lexer code from the spec
+                                match lexgen::parse_lexer_spec(&self.auto_lexer_spec) {
+                                    Ok(spec) => {
+                                        match lexgen::generate_code(&spec, self.language.as_str()) {
+                                            Ok(lexer_code) => {
+                                                self.lexer_output = lexer_code;
+                                                self.log(
+                                                    LogLevel::Info,
+                                                    "Also auto-generated lexer from token spec",
+                                                );
+                                            }
+                                            Err(e) => {
+                                                self.log(
+                                                    LogLevel::Warning,
+                                                    &format!("Could not auto-generate lexer: {}", e),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.log(
+                                            LogLevel::Warning,
+                                            &format!("Invalid auto-generated lexer spec: {}", e),
+                                        );
+                                    }
+                                }
+
                                 self.status = format!(
                                     "Generated {} {} parser ({} lines)",
                                     self.language.display_name(),
