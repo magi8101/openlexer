@@ -164,8 +164,7 @@ impl Grammar {
             }
         }
 
-        // Add identifier rule for any token-like identifiers
-        // (tokens without explicit literals that look like identifiers)
+        // Add TODO patterns for tokens without explicit literals
         let has_pattern_tokens = self.tokens.iter().any(|t| {
             !self.token_literals.contains_key(t) &&
             t.chars().all(|c| c.is_uppercase() || c == '_')
@@ -175,7 +174,16 @@ impl Grammar {
             rules.push("/* TODO: Define patterns for the following tokens: */".to_string());
             for token in &self.tokens {
                 if !self.token_literals.contains_key(token) {
-                    rules.push(format!("/* [a-z]+    {{ return {}; }} */", token));
+                    // Suggest pattern based on token name conventions
+                    let pattern = match token.as_str() {
+                        "NUMBER" | "NUM" | "INTEGER" | "INT" | "FLOAT" | "DOUBLE" | "DECIMAL" => "[0-9]+",
+                        "IDENTIFIER" | "ID" | "NAME" | "VAR" => "[a-zA-Z_][a-zA-Z0-9_]*",
+                        "STRING" | "STR" => "\"([^\"\\\\]|\\\\.)*\"",
+                        _ if token.starts_with("NUM") => "[0-9]+",
+                        _ if token.starts_with("ID") || token.starts_with("NAME") => "[a-zA-Z_][a-zA-Z0-9_]*",
+                        _ => "[a-z]+",
+                    };
+                    rules.push(format!("/* {}    {{ return {}; }} */", pattern, token));
                 }
             }
         }
