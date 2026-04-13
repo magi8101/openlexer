@@ -699,11 +699,22 @@ impl<'a> GrammarParser<'a> {
             if self.peek_char() == '%' || self.is_eof() {
                 break;
             }
-            let name = self.parse_ident()?;
-            if !name.is_empty() {
-                symbols.push(name);
+
+            // Handle both identifiers and character literals
+            if self.peek_char() == '\'' || self.peek_char() == '"' {
+                // Parse character/string literal and convert to token name
+                let (token_name, literal_value) = self.parse_char_literal()?;
+                symbols.push(token_name.clone());
+
+                // Record the literal value for later reference
+                self.grammar.token_literals.insert(token_name, literal_value);
             } else {
-                break;
+                let name = self.parse_ident()?;
+                if !name.is_empty() {
+                    symbols.push(name);
+                } else {
+                    break;
+                }
             }
         }
         self.grammar.precedence.push(Precedence {
