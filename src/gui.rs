@@ -722,11 +722,45 @@ impl OpenLexerApp {
         } else {
             // Standard append logic for Python/C
             if include_lexer {
-                if self.lexer_output.is_empty() {
+                // Use explicit lexer if available, otherwise try auto-generated spec
+                let lexer_to_use = if !self.lexer_output.is_empty() {
+                    self.lexer_output.clone()
+                } else if !self.auto_lexer_spec.is_empty() {
+                    // Auto-generate lexer from parser's token spec
+                    self.log(
+                        LogLevel::Info,
+                        "No explicit lexer found. Generating from parser token specification...",
+                    );
+                    match lexgen::parse_lexer_spec(&self.auto_lexer_spec) {
+                        Ok(spec) => {
+                            match lexgen::generate_code(&spec, self.language.as_str()) {
+                                Ok(code) => {
+                                    self.log(LogLevel::Success, "Auto-generated lexer from parser tokens");
+                                    code
+                                }
+                                Err(e) => {
+                                    self.log(
+                                        LogLevel::Warning,
+                                        &format!("Could not auto-generate lexer: {}", e),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.log(
+                                LogLevel::Warning,
+                                &format!("Invalid auto-generated lexer spec: {}", e),
+                            );
+                            return;
+                        }
+                    }
+                } else {
                     self.log(LogLevel::Warning, "No generated lexer. Go to Lexer tab and Generate first.");
                     return;
-                }
-                full_code.push_str(&self.strip_default_main(&self.lexer_output));
+                };
+
+                full_code.push_str(&self.strip_default_main(&lexer_to_use));
                 full_code.push('\n');
             }
 
