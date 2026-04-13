@@ -761,6 +761,19 @@ impl<'a> GrammarParser<'a> {
                 }
             } else if self.peek_char() == '|' || self.peek_char() == ';' || self.is_eof() {
                 break;
+            } else if self.peek_char() == '\'' || self.peek_char() == '"' {
+                // Parse character/string literal: 'x', '\n', "keyword", etc.
+                let (literal_token, literal_value) = self.parse_char_literal()?;
+
+                // Auto-declare as token if not already declared
+                if !self.grammar.tokens.contains(&literal_token) {
+                    self.grammar.tokens.push(literal_token.clone());
+                }
+
+                // Record the literal value for lexer generation
+                self.grammar.token_literals.insert(literal_token.clone(), literal_value);
+
+                rhs.push(Symbol::Terminal(literal_token));
             } else {
                 let name = self.parse_ident()?;
                 // Fix: consume may return empty if at special char like %
@@ -851,6 +864,94 @@ impl<'a> GrammarParser<'a> {
         }
         Ok(self.input[start..self.pos].to_string())
     }
+
+    /// Parse a character literal like 'x', '\n', or a string literal like "keyword"
+    /// Returns: (token_name, literal_value)
+    fn parse_char_literal(&mut self) -> Result<(String, String)> {
+        let quote = self.peek_char();
+        self.advance(); // consume opening quote
+
+        let mut literal = String::new();
+        while !self.is_eof() && self.peek_char() != quote {
+            if self.peek_char() == '\\' && quote == '\'' {
+                // Handle escape sequences like '\n', '\t'
+                self.advance();
+                if !self.is_eof() {
+                    let escaped = self.peek_char();
+                    literal.push('\\');
+                    literal.push(escaped);
+                    self.advance();
+                }
+            } else if self.peek_char() == '\\' && quote == '"' {
+                // In double-quoted strings, keep backslash as-is for double escaping
+                literal.push(self.peek_char());
+                self.advance();
+            } else {
+                literal.push(self.peek_char());
+                self.advance();
+            }
+        }
+
+        if self.peek_char() == quote {
+            self.advance(); // consume closing quote
+        }
+
+        // Generate a unique token name from the literal
+        let token_name = match quote {
+            '\'' => {
+                // Single-quoted: map escapes like \n -> NEWLINE, \t -> TAB, or just use the character
+                match literal.as_str() {
+                    "\\n" => "NEWLINE".to_string(),
+                    "\\t" => "TAB".to_string(),
+                    "\\r" => "RETURN".to_string(),
+                    _ if literal.len() == 1 => {
+                        // Single character: +_PLUS, *_STAR, etc.
+                        let ch = literal.chars().next().unwrap();
+                        match ch {
+                            '+' => "PLUS".to_string(),
+                            '-' => "MINUS".to_string(),
+                            '*' => "STAR".to_string(),
+                            '/' => "SLASH".to_string(),
+                            '%' => "PERCENT".to_string(),
+                            '=' => "ASSIGN".to_string(),
+                            '<' => "LT".to_string(),
+                            '>' => "GT".to_string(),
+                            '!' => "NOT".to_string(),
+                            '&' => "AMP".to_string(),
+                            '|' => "PIPE".to_string(),
+                            '(' => "LPAREN".to_string(),
+                            ')' => "RPAREN".to_string(),
+                            '[' => "LBRACKET".to_string(),
+                            ']' => "RBRACKET".to_string(),
+                            '{' => "LBRACE".to_string(),
+                            '}' => "RBRACE".to_string(),
+                            ';' => "SEMICOLON".to_string(),
+                            ',' => "COMMA".to_string(),
+                            '.' => "DOT".to_string(),
+                            ':' => "COLON".to_string(),
+                            '?' => "QUESTION".to_string(),
+                            '^' => "CARET".to_string(),
+                            '~' => "TILDE".to_string(),
+                            '@' => "AT".to_string(),
+                            '#' => "HASH".to_string(),
+                            '$' => "DOLLAR".to_string(),
+                            '\\' => "BACKSLASH".to_string(),
+                            _ => format!("CHAR_{:x}", ch as u32),
+                        }
+                    }
+                    _ => format!("CHAR_{}", literal.chars().next().map(|c| c as u32).unwrap_or(0)),
+                }
+            }
+            '"' => {
+                // Double-quoted keyword: uppercase it
+                literal.to_uppercase()
+            }
+            _ => "UNKNOWN".to_string(),
+        };
+
+        Ok((token_name, literal))
+    }
+
 
     // =========================================================================
     // Textbook notation support
