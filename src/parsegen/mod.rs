@@ -1,8 +1,12 @@
+pub mod action_parser;
 pub mod codegen;
+pub mod error_recovery;
 pub mod first;
 pub mod glr;
 pub mod grammar;
 pub mod lalr;
+pub mod multiline_handler;
+pub mod printf_converter;
 
 pub use glr::{GlrParser, GlrTable, ParseForest, Token as GlrToken};
 pub use grammar::{Grammar, Rule};

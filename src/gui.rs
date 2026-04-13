@@ -306,6 +306,7 @@ struct OpenLexerApp {
     parser_input: String,
     parser_output: String,
     parser_options: ParserOptions,
+    auto_lexer_spec: String,  // Auto-generated lexer spec from parser tokens
 
     // Try tab - user test program
     try_code: String,
@@ -433,6 +434,7 @@ impl OpenLexerApp {
             parser_input: String::new(),
             parser_output: String::new(),
             parser_options: ParserOptions::default(),
+            auto_lexer_spec: String::new(),
             try_code: String::new(),
             try_include: TryInclude::LexerOnly,
             cached_nfa: None,
@@ -619,6 +621,7 @@ impl OpenLexerApp {
                             Ok(code) => {
                                 let line_count = code.lines().count();
                                 self.parser_output = code;
+                                self.auto_lexer_spec = grammar.generate_lexer_spec();
                                 self.status = format!(
                                     "Generated {} {} parser ({} lines)",
                                     self.language.display_name(),

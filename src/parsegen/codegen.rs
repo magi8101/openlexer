@@ -4,6 +4,9 @@ use crate::error::Result;
 use crate::lexgen::codegen::TargetLanguage;
 use crate::parsegen::grammar::{Grammar, Rule, Symbol};
 use crate::parsegen::lalr::{Action, ParsingTable};
+use crate::parsegen::printf_converter;
+use crate::parsegen::error_recovery::ErrorRecoveryHandler;
+use crate::parsegen::multiline_handler;
 
 
 pub fn generate_parser(
@@ -1069,8 +1072,6 @@ fn generate_java_parser_test_driver() -> String {
 }
 
 /// Translate Bison-style semantic action to Java.
-/// Converts $$ to result.dval, $1/$2/etc to vals[0].dval/vals[1].dval/etc.
-/// Also handles non-standard `result` variable references used in some grammars.
 fn translate_action_java(action: &str, rhs_len: usize) -> String {
     let mut out = String::new();
     let chars: Vec<char> = action.chars().collect();
@@ -1105,56 +1106,47 @@ fn translate_action_java(action: &str, rhs_len: usize) -> String {
         }
     }
 
-    // Handle non-standard `result` variable (used in some grammars as global)
-    // Replace "result" with "result.dval" using word boundary checks
-    // Avoid replacing "result" if it's already part of "result.dval"
-    let mut result_out = String::new();
-    let out_chars: Vec<char> = out.chars().collect();
-    let mut i = 0;
-    while i < out_chars.len() {
-        if i + 6 <= out_chars.len()
-            && out_chars[i..i+6] == ['r', 'e', 's', 'u', 'l', 't']
-            && (i == 0 || (!out_chars[i-1].is_alphanumeric() && out_chars[i-1] != '.'))
-            && (i + 6 >= out_chars.len() || (!out_chars[i+6].is_alphanumeric() && out_chars[i+6] != '.')) {
-            // Found standalone "result" word (not part of result.dval or identifier)
-            result_out.push_str("result.dval");
-            i += 6;
+    let mut result = out;
+    let mut printf_found = false;
+
+    if let Some(printf_action) = printf_converter::extract_printf_call(&result) {
+        let java_printf = printf_converter::convert_printf_to_java(&printf_action.fmt_str, &printf_action.args);
+
+        let start_pos = result.find("printf(").unwrap_or(0);
+        if start_pos > 0 {
+            let before_printf = &result[..start_pos];
+            result = format!("{}{}", before_printf, java_printf);
         } else {
-            result_out.push(out_chars[i]);
-            i += 1;
+            result = java_printf;
         }
+        printf_found = true;
     }
 
-    let mut out = result_out;
+    if !printf_found {
+        result = result.replace("printf(", "System.out.printf(");
+    }
 
-    // Convert C patterns to Java
-    out = out.replace("printf(", "System.out.printf(");
-    out = out.replace("pow(", "Math.pow(");
+    result = result.replace("pow(", "Math.pow(");
 
-    // Handle fmod - replace with % operator for modulo
-    // Simple approach for common case: fmod(x,y) becomes (x%y)
-    while let Some(pos) = out.find("fmod(") {
-        if let Some(close_paren) = out[pos..].find(')') {
+    while let Some(pos) = result.find("fmod(") {
+        if let Some(close_paren) = result[pos..].find(')') {
             let close_pos = pos + close_paren;
-            let func_call = &out[pos+5..close_pos];  // Everything between fmod( and )
+            let func_call = &result[pos + 5..close_pos];
             if let Some(comma_pos) = func_call.find(',') {
-                let arg1 = &func_call[..comma_pos].trim();
-                let arg2 = &func_call[comma_pos+1..].trim();
+                let arg1 = func_call[..comma_pos].trim();
+                let arg2 = func_call[comma_pos + 1..].trim();
                 let replacement = format!("({} % {})", arg1, arg2);
-                out.replace_range(pos..close_pos+1, &replacement);
+                result.replace_range(pos..close_pos + 1, &replacement);
             } else {
-                break;  // Not standard fmod(x,y) format, skip
+                break;
             }
         } else {
             break;
         }
     }
 
-    // Remove C-specific tokens
-    let out = out.replace("yyerrok;", "");
-    let out = out.replace("yyerror(", "// Error: ");
-
-    out
+    result = ErrorRecoveryHandler::replace_error_handling_java(&result);
+    result
 }
 
 fn generate_python(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
@@ -1244,9 +1236,21 @@ fn generate_python(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
         if let Some(action) = &rule.action {
             let translated = translate_action_python(action, rule.rhs.len());
             code.push_str(&format!("                if rule_id == {}:\n", i));
-            for line in translated.lines() {
-                if !line.trim().is_empty() {
-                    code.push_str(&format!("                    {}\n", line.trim()));
+
+            if translated.contains('\n') && (translated.contains("if ") || translated.contains("else")) {
+                for line in translated.lines() {
+                    if line.contains("if ") || line.contains("else") || line.starts_with(' ') {
+                        let indent_str = if line.starts_with(' ') { "" } else { "                    " };
+                        code.push_str(&format!("{}{}\n", indent_str, line));
+                    } else if !line.trim().is_empty() {
+                        code.push_str(&format!("                    {}\n", line.trim()));
+                    }
+                }
+            } else {
+                for line in translated.lines() {
+                    if !line.trim().is_empty() {
+                        code.push_str(&format!("                    {}\n", line.trim()));
+                    }
                 }
             }
         }
@@ -1407,16 +1411,10 @@ pub fn generate_python_parser_test_driver() -> String {
 
 /// Translate Bison-style semantic action to Python.
 fn translate_action_python(action: &str, rhs_len: usize) -> String {
-    // Complex C blocks can't auto-translate
-    if action.contains('{') || (action.contains("if ") && action.contains("else")) {
-        return "pass  # C code, manual translation needed".to_string();
-    }
-
     let mut out = String::new();
     let chars: Vec<char> = action.chars().collect();
     let mut i = 0;
 
-    // Pass 1: Replace $$ and $N
     while i < chars.len() {
         if chars[i] == '$' && i + 1 < chars.len() {
             if chars[i + 1] == '$' {
@@ -1446,75 +1444,24 @@ fn translate_action_python(action: &str, rhs_len: usize) -> String {
         }
     }
 
-    // Pass 2: Convert printf to Python print
-    let mut py_code = String::new();
-    let out_chars: Vec<char> = out.chars().collect();
-    let mut j = 0;
+    let mut result = out;
 
-    while j < out_chars.len() {
-        if j + 6 < out_chars.len() && &out_chars[j..j+6] == ['p', 'r', 'i', 'n', 't', 'f'] {
-            let mut fmt_str = String::new();
-            let mut args = String::new();
-            let mut paren_depth = 0;
-
-            j += 6;
-
-            while j < out_chars.len() && out_chars[j] != '(' {
-                j += 1;
-            }
-            j += 1;
-
-            if out_chars[j] == '"' {
-                j += 1;
-                while j < out_chars.len() && out_chars[j] != '"' {
-                    if out_chars[j] == '%' && j + 1 < out_chars.len() {
-                        match out_chars[j + 1] {
-                            'd' | 'g' | 'f' | 'i' | 's' | 'x' | 'o' => {
-                                fmt_str.push_str("{}");
-                                j += 2;
-                            }
-                            '%' => {
-                                fmt_str.push('%');
-                                j += 2;
-                            }
-                            _ => {
-                                fmt_str.push(out_chars[j]);
-                                j += 1;
-                            }
-                        }
-                    } else {
-                        fmt_str.push(out_chars[j]);
-                        j += 1;
-                    }
-                }
-                j += 1;
-
-                if j < out_chars.len() && out_chars[j] == ',' {
-                    j += 1;
-                    while j < out_chars.len() && out_chars[j] == ' ' {
-                        j += 1;
-                    }
-
-                    while j < out_chars.len() && out_chars[j] != ')' {
-                        args.push(out_chars[j]);
-                        j += 1;
-                    }
-                }
-
-                py_code.push_str(&format!("print(\"{}\".format({}))", fmt_str, args.trim()));
-                if j < out_chars.len() && out_chars[j] == ')' {
-                    j += 1;
-                }
-            }
-        } else {
-            py_code.push(out_chars[j]);
-            j += 1;
+    if multiline_handler::has_multiline_block(&result) {
+        if let Some(translated) = multiline_handler::translate_simple_if_else(&result) {
+            return translated;
         }
+        return "pass  # Complex multi-line C block - manual translation needed".to_string();
     }
 
-    let mut result = py_code.replace(");", ")");
-    result = result.replace("yyerror(\"", "# ");
-    result = result.replace("yyerror(", "# ");
+    if let Some(action) = printf_converter::extract_printf_call(&result) {
+        let py_printf = printf_converter::convert_printf_to_python(&action.fmt_str, &action.args);
+        result = py_printf;
+    }
+
+    result = ErrorRecoveryHandler::replace_error_handling_python(&result);
+    result = result.replace("pow(", "pow(");
+    result = result.replace("fmod(", "fmod(");
+
     result
 }
 

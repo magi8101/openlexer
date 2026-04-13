@@ -208,6 +208,12 @@ fn main() -> Result<()> {
             let output_path = output.join(filename);
             fs::write(&output_path, code)?;
             println!("Success! Generated {}", output_path.display());
+
+            // Generate simple lexer spec from token declarations
+            let lexer_spec = grammar.generate_lexer_spec();
+            let lexer_spec_path = output.join("lexer_spec.l");
+            fs::write(&lexer_spec_path, lexer_spec)?;
+            println!("Generated lexer spec: {}", lexer_spec_path.display());
         }
 
         Commands::TestDriver { lang, output } => {

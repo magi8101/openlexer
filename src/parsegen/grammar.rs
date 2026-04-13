@@ -376,7 +376,28 @@ impl<'a> GrammarParser<'a> {
             if !name.is_empty() {
                 self.grammar.tokens.push(name.clone());
                 if let Some(ref tag) = type_tag {
-                    self.grammar.token_types.insert(name, tag.clone());
+                    self.grammar.token_types.insert(name.clone(), tag.clone());
+                }
+
+                // Parse optional literal value (e.g., %token PLUS "+" or %token IF 'if')
+                self.skip_whitespace();
+                if self.peek_char() == '"' || self.peek_char() == '\'' {
+                    let quote = self.peek_char();
+                    self.advance();
+                    let start = self.pos;
+                    while !self.is_eof() && self.peek_char() != quote {
+                        if self.peek_char() == '\\' {
+                            self.advance();
+                            if !self.is_eof() {
+                                self.advance();
+                            }
+                        } else {
+                            self.advance();
+                        }
+                    }
+                    let literal = self.input[start..self.pos].to_string();
+                    self.advance(); // consume closing quote
+                    self.grammar.token_literals.insert(name, literal);
                 }
             } else {
                 break;
