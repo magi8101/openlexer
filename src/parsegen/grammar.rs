@@ -243,7 +243,9 @@ impl Grammar {
         }
 
         // Always add whitespace skip and catch-all. Carefully avoid eating \n if it's explicitly a token.
-        let skip_rule = if self.token_literals.values().any(|v| v == "\\n") {
+        let has_newline_token = self.token_literals.values().any(|v| v == "\\n")
+            || self.tokens.iter().any(|t| matches!(t.as_str(), "NEWLINE" | "NL" | "EOL"));
+        let skip_rule = if has_newline_token {
             "[ \\t\\r]+"
         } else {
             "[ \\t\\r\\n]+"
@@ -313,6 +315,7 @@ impl Grammar {
 struct GrammarParser<'a> {
     input: &'a str,
     pos: usize,
+    line: usize,
     grammar: Grammar,
     /// Pending mid-rule action rules to be added after current rule parsing.
     pending_mid_rule_actions: Vec<Rule>,
@@ -323,6 +326,7 @@ impl<'a> GrammarParser<'a> {
         Self {
             input,
             pos: 0,
+            line: 1,
             grammar: Grammar::new(),
             pending_mid_rule_actions: Vec::new(),
         }
@@ -364,7 +368,7 @@ impl<'a> GrammarParser<'a> {
             }
         } else {
             return Err(Error::GrammarError {
-                line: 0,
+                line: self.line,
                 message: "Missing %% separator".to_string(),
             });
         }
@@ -529,7 +533,7 @@ impl<'a> GrammarParser<'a> {
     fn parse_type_tag(&mut self) -> Result<String> {
         if !self.consume("<") {
             return Err(Error::GrammarError {
-                line: 0,
+                line: self.line,
                 message: "Expected '<' for type tag".to_string(),
             });
         }
@@ -540,7 +544,7 @@ impl<'a> GrammarParser<'a> {
         let tag = self.input[start..self.pos].trim().to_string();
         if !self.consume(">") {
             return Err(Error::GrammarError {
-                line: 0,
+                line: self.line,
                 message: "Expected '>' to close type tag".to_string(),
             });
         }
@@ -552,7 +556,7 @@ impl<'a> GrammarParser<'a> {
         self.skip_whitespace_and_comments();
         if !self.consume("{") {
             return Err(Error::GrammarError {
-                line: 0,
+                line: self.line,
                 message: "Expected '{' after %union".to_string(),
             });
         }
@@ -633,7 +637,7 @@ impl<'a> GrammarParser<'a> {
             self.parse_type_tag()?
         } else {
             return Err(Error::GrammarError {
-                line: 0,
+                line: self.line,
                 message: "Expected <type> after %type or %nterm".to_string(),
             });
         };
@@ -659,7 +663,7 @@ impl<'a> GrammarParser<'a> {
             self.parse_action_block()?
         } else {
             return Err(Error::GrammarError {
-                line: 0,
+                line: self.line,
                 message: "Expected '{' after %destructor".to_string(),
             });
         };
@@ -798,7 +802,7 @@ impl<'a> GrammarParser<'a> {
             self.skip_whitespace_and_comments();
             if !self.consume(":") {
                 return Err(Error::GrammarError {
-                    line: 0,
+                    line: self.line,
                     message: format!("Expected ':' after rule '{}'", lhs),
                 });
             }
@@ -916,7 +920,8 @@ impl<'a> GrammarParser<'a> {
     }
 
     fn parse_action_block(&mut self) -> Result<String> {
-        // Consume { ... } coping with nested braces
+        // Consume { ... } coping with nested braces, but skip braces
+        // inside string literals, char literals, and comments.
         if !self.consume("{") {
             return Ok(String::new());
         }
@@ -926,6 +931,59 @@ impl<'a> GrammarParser<'a> {
 
         while depth > 0 && !self.is_eof() {
             let c = self.peek_char();
+
+            // Skip string literals: "..."
+            if c == '"' {
+                self.advance();
+                while !self.is_eof() && self.peek_char() != '"' {
+                    if self.peek_char() == '\\' {
+                        self.advance(); // skip escape
+                    }
+                    self.advance();
+                }
+                if !self.is_eof() {
+                    self.advance(); // consume closing "
+                }
+                continue;
+            }
+
+            // Skip char literals: '...'
+            if c == '\'' {
+                self.advance();
+                while !self.is_eof() && self.peek_char() != '\'' {
+                    if self.peek_char() == '\\' {
+                        self.advance(); // skip escape
+                    }
+                    self.advance();
+                }
+                if !self.is_eof() {
+                    self.advance(); // consume closing '
+                }
+                continue;
+            }
+
+            // Skip line comments: // ...
+            if c == '/' && self.peek_str("//") {
+                while !self.is_eof() && self.peek_char() != '\n' {
+                    self.advance();
+                }
+                continue;
+            }
+
+            // Skip block comments: /* ... */
+            if c == '/' && self.peek_str("/*") {
+                self.advance(); // /
+                self.advance(); // *
+                while !self.is_eof() && !self.peek_str("*/") {
+                    self.advance();
+                }
+                if !self.is_eof() {
+                    self.advance(); // *
+                    self.advance(); // /
+                }
+                continue;
+            }
+
             if c == '{' {
                 depth += 1;
             }
@@ -950,12 +1008,17 @@ impl<'a> GrammarParser<'a> {
 
     fn advance(&mut self) {
         if let Some(c) = self.input[self.pos..].chars().next() {
+            if c == '\n' {
+                self.line += 1;
+            }
             self.pos += c.len_utf8();
         }
     }
 
     fn consume(&mut self, s: &str) -> bool {
         if self.input[self.pos..].starts_with(s) {
+            // Count newlines in consumed string
+            self.line += s.chars().filter(|&c| c == '\n').count();
             self.pos += s.len();
             return true;
         }

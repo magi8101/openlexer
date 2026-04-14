@@ -223,8 +223,8 @@ pub fn convert_printf_to_java(fmt: &str, args: &str) -> String {
     let (java_fmt, _spec_count) = format.to_java();
 
     if args.is_empty() {
-        format!("System.out.printf(\"{}\")", java_fmt)
+        format!("System.out.printf(\"{}\");", java_fmt)
     } else {
-        format!("System.out.printf(\"{}\", {})", java_fmt, args)
+        format!("System.out.printf(\"{}\", {});", java_fmt, args)
     }
 }

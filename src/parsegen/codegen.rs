@@ -136,9 +136,10 @@ fn generate_c(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("// Action: 0=Error, 1=Shift, 2=Reduce, 3=Accept\n");
     code.push_str("void get_action(int state, const char* token, int* type, int* param) {\n");
     code.push_str("    *type = 0; *param = 0;\n");
+    code.push_str("    switch(state) {\n");
 
     for (state, actions) in &table.action {
-        code.push_str(&format!("    if (state == {}) {{\n", state));
+        code.push_str(&format!("    case {}:\n", state));
         for (term, act) in actions {
             let (t, p) = match act {
                 Action::Shift(n) => (1, *n),
@@ -150,22 +151,25 @@ fn generate_c(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
                 term, t, p
             ));
         }
-        code.push_str("    }\n");
+        code.push_str("        break;\n");
     }
+    code.push_str("    }\n");
     code.push_str("}\n\n");
 
     // Goto Lookup Function
     code.push_str("int get_goto(int state, const char* lhs) {\n");
+    code.push_str("    switch(state) {\n");
     for (state, gotos) in &table.goto {
-        code.push_str(&format!("    if (state == {}) {{\n", state));
+        code.push_str(&format!("    case {}:\n", state));
         for (nt, next) in gotos {
             code.push_str(&format!(
                 "        if (strcmp(lhs, \"{}\") == 0) return {};\n",
                 nt, next
             ));
         }
-        code.push_str("    }\n");
+        code.push_str("        break;\n");
     }
+    code.push_str("    }\n");
     code.push_str("    return -1;\n");
     code.push_str("}\n\n");
 
@@ -722,7 +726,7 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("import java.util.ArrayList;\n\n");
     code.push_str("class Parser {\n");
 
-    // Generate YYSTYPE class if union is declared
+    // Generate YYSTYPE class
     if grammar.has_union() {
         code.push_str("    /* Semantic value type from %union */\n");
         code.push_str("    public static class YYSTYPE {\n");
@@ -730,6 +734,11 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
             let java_type = c_type_to_java(&field.c_type);
             code.push_str(&format!("        public {} {};\n", java_type, field.name));
         }
+        code.push_str("    }\n\n");
+    } else {
+        code.push_str("    /* Default semantic value type */\n");
+        code.push_str("    public static class YYSTYPE {\n");
+        code.push_str("        public double dval;\n");
         code.push_str("    }\n\n");
     }
 
@@ -923,6 +932,8 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("                if (gotoTable.containsKey(top) && gotoTable.get(top).containsKey(lhs)) {\n");
     code.push_str("                    stack.push(gotoTable.get(top).get(lhs));\n");
     code.push_str("                    valueStack.push(result);\n");
+    code.push_str("                } else {\n");
+    code.push_str("                    throw new RuntimeException(\"Internal goto error for \" + lhs + \" from state \" + top);\n");
     code.push_str("                }\n");
     code.push_str("            } else if (act.type == 'A') {\n");
     code.push_str("                return (int)valueStack.peek().dval;\n");
@@ -1047,7 +1058,10 @@ fn generate_java_parser_test_driver() -> String {
     code.push_str("    \n");
     code.push_str("    /** Test parsing an expression. */\n");
     code.push_str("    public static void testParse(String expr) {\n");
-    code.push_str("        System.out.println(\"Parsing: \\\"\" + expr + \"\\\"\");\n");
+    code.push_str("        // Auto-append newline if missing; harmless when \\n is whitespace,\n");
+    code.push_str("        // required when the grammar uses '\\n' as a statement terminator.\n");
+    code.push_str("        if (!expr.endsWith(\"\\n\")) expr += \"\\n\";\n");
+    code.push_str("        System.out.println(\"Parsing: \\\"\" + expr.trim() + \"\\\"\");\n");
     code.push_str("        try {\n");
     code.push_str("            // Try to load and use generated Lexer\n");
     code.push_str("            Class<?> lexerClass = Class.forName(\"Lexer\");\n");
