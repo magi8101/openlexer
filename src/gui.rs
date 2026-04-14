@@ -1,4 +1,4 @@
-﻿//! OpenLexer GUI - Modern egui-based interface for lexer/parser generation
+//! OpenLexer GUI - Modern egui-based interface for lexer/parser generation
 //! Compiles to both native desktop and WASM for web browsers
 //!
 //! Features:
@@ -582,7 +582,7 @@ impl OpenLexerApp {
         );
 
         match parsegen::parse_grammar(&self.parser_input) {
-            Ok(grammar) => {
+            Ok(mut grammar) => {
                 let rule_count = grammar.rules.len();
                 let token_count = grammar.tokens.len();
                 self.log(
@@ -599,6 +599,10 @@ impl OpenLexerApp {
                 };
 
                 self.log(LogLevel::Info, &format!("Building {} parsing tables...", mode_str));
+
+                if mode_str == "GLR" {
+                    grammar.glr_mode = true;
+                }
 
                 match ParsingTable::build(&grammar) {
                     Ok(table) => {
@@ -993,7 +997,6 @@ impl OpenLexerApp {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.lexer_options.include_test_driver, "Test Driver");
                 ui.checkbox(&mut self.lexer_options.enable_unicode, "Unicode");
-                ui.checkbox(&mut self.lexer_options.optimize_dfa, "Optimize");
             });
         }
         ui.add_space(2.0);
@@ -2198,11 +2201,28 @@ while ((t = l.next()).type != TokenType.EOF) {
 
         if table.glr_conflict_actions.is_empty() {
             ui.label(
-                egui::RichText::new("No conflicts found (grammar is LALR(1)).")
+                egui::RichText::new("No conflicts found (grammar is strictly LALR(1)).")
                     .color(egui::Color32::GREEN),
             );
             return;
         }
+
+        let unresolved = table.shift_reduce_conflicts + table.reduce_reduce_conflicts;
+        if unresolved == 0 {
+            ui.label(
+                egui::RichText::new("✓ All Shift-Reduce conflicts successfully resolved by precedence! ✨")
+                    .color(egui::Color32::GREEN)
+                    .strong(),
+            );
+            ui.label("The GLR-tracked paths below are fully resolved and will not cause errors in LALR mode.");
+        } else {
+            ui.label(
+                egui::RichText::new(format!("⚠️ Grammar contains {} unresolved conflicts!", unresolved))
+                    .color(egui::Color32::RED)
+                    .strong(),
+            );
+        }
+        ui.add_space(5.0);
 
         TableBuilder::new(ui)
             .striped(true)
