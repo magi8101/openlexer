@@ -254,7 +254,6 @@ struct LogEntry {
 struct LexerOptions {
     include_test_driver: bool,
     enable_unicode: bool,
-    optimize_dfa: bool,
 }
 
 impl Default for LexerOptions {
@@ -262,7 +261,6 @@ impl Default for LexerOptions {
         Self {
             include_test_driver: true,
             enable_unicode: true,
-            optimize_dfa: true,
         }
     }
 }
