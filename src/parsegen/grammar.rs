@@ -195,8 +195,13 @@ impl Grammar {
             }
         }
 
-        // Always add whitespace skip and catch-all
-        rules.push("[ \\t\\n]+    { /* skip whitespace */ }".to_string());
+        // Always add whitespace skip and catch-all. Carefully avoid eating \n if it's explicitly a token.
+        let skip_rule = if self.token_literals.values().any(|v| v == "\\n") {
+            "[ \\t\\r]+"
+        } else {
+            "[ \\t\\r\\n]+"
+        };
+        rules.push(format!("{}    {{ /* skip whitespace */ }}", skip_rule));
         rules.push(".           { /* skip unknown */ }".to_string());
 
         format!(

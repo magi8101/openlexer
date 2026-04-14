@@ -1327,7 +1327,11 @@ pub fn generate_python_parser_test_driver() -> String {
     code.push_str("        try:\n");
     code.push_str("            self.value = int(tok.text) if tok.text.isdigit() else tok.text\n");
     code.push_str("        except:\n");
-    code.push_str("            self.value = tok.text\n\n\n");
+    code.push_str("            self.value = tok.text\n\n");
+    code.push_str("    def __str__(self):\n");
+    code.push_str("        return f'{self.type} ({self.value!r})'\n\n");
+    code.push_str("    def __repr__(self):\n");
+    code.push_str("        return self.__str__()\n\n\n");
     code.push_str("def parse_expression(expr: str, lexer_class=None):\n");
     code.push_str("    \"\"\"Parse an expression string and return the result.\n");
     code.push_str("    \n");
@@ -1399,10 +1403,9 @@ pub fn generate_python_parser_test_driver() -> String {
     code.push_str("        for arg in sys.argv[1:]:\n");
     code.push_str("            test_parse(arg)\n");
     code.push_str("    else:\n");
-    code.push_str("        _input = sys.stdin.read().strip()\n");
+    code.push_str("        _input = sys.stdin.read()\n");
     code.push_str("        if _input:\n");
-    code.push_str("            for line in _input.splitlines():\n");
-    code.push_str("                test_parse(line)\n");
+    code.push_str("            test_parse(_input)\n");
     code.push_str("        else:\n");
     code.push_str("            print('Usage: python parser.py \"input to parse\"')\n");
     code.push_str("            print('   or: echo \"input\" | python parser.py')\n");
