@@ -1381,6 +1381,10 @@ pub fn generate_python_parser_test_driver() -> String {
     code.push_str("        if LexerClass is None:\n");
     code.push_str("            raise ImportError('Could not import Lexer. Checked modules lexer/Lexer and sibling files lexer.py/Lexer.py.')\n");
     code.push_str("    \n");
+    code.push_str("    # Auto-append newline if missing; harmless when \\n is whitespace,\n");
+    code.push_str("    # required when the grammar uses '\\n' as a statement terminator.\n");
+    code.push_str("    if not expr.endswith('\\n'):\n");
+    code.push_str("        expr += '\\n'\n");
     code.push_str("    adapter = LexerAdapter(LexerClass(expr))\n");
     code.push_str("    parser = Parser(adapter)\n");
     code.push_str("    return parser.parse()\n\n\n");
