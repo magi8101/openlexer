@@ -329,11 +329,20 @@ fn generate_c(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
         code.push_str("}\n\n");
     }
 
-    // Error reporting function (always generate yyerror for user semantic actions)
-    code.push_str("void yyerror(const char *msg) {\n");
-    code.push_str("    fprintf(stderr, \"%s\\n\", msg);\n");
-    code.push_str("    yynerrs++;\n");
-    code.push_str("}\n\n");
+    // Error reporting function — only generate if the user didn't provide one
+    let user_defines_yyerror = grammar.prologue.as_deref().map_or(false, |p| p.contains("yyerror"))
+        || grammar.epilogue.as_deref().map_or(false, |e| e.contains("yyerror"));
+    if !user_defines_yyerror {
+        code.push_str("void yyerror(const char *msg) {\n");
+        code.push_str("    fprintf(stderr, \"%s\\n\", msg);\n");
+        code.push_str("    yynerrs++;\n");
+        code.push_str("}\n\n");
+    } else {
+        // User provides their own yyerror; just ensure a forward declaration exists
+        // so yyparse() can reference it even when the definition comes in the epilogue
+        code.push_str("/* User-defined yyerror — forward declaration */\n");
+        code.push_str("void yyerror(const char *msg);\n\n");
+    }
 
     if grammar.error_verbose && !grammar.lac_enabled {
         code.push_str("static void yyerror_detailed(int state, int token) {\n");
@@ -477,8 +486,14 @@ fn generate_c(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
         code.push_str("\n\n");
     }
 
-    // Add combined test driver
-    code.push_str(&generate_c_parser_test_driver());
+    // Only add the test driver if the user didn't already provide main()
+    let user_defines_main = grammar.epilogue.as_deref().map_or(false, |e| {
+        // Match common main signatures: "int main", "void main"
+        e.contains("int main") || e.contains("void main")
+    });
+    if !user_defines_main {
+        code.push_str(&generate_c_parser_test_driver());
+    }
 
     Ok(code)
 }
@@ -940,10 +955,17 @@ fn generate_java(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("    \n");
 
     if let Some(epilogue) = &grammar.epilogue {
-        if !epilogue.contains("#include") {
+        let is_c_code = epilogue.contains("#include")
+            || epilogue.contains("void yyerror(")
+            || epilogue.contains("int main(")
+            || epilogue.contains("fprintf(");
+            
+        if !is_c_code {
             code.push_str("    /* User epilogue from grammar trailer */\n");
             code.push_str(epilogue);
             code.push_str("\n\n");
+        } else {
+            code.push_str("    /* Note: C-style epilogue skipped in Java output */\n\n");
         }
     }
 
@@ -1109,16 +1131,12 @@ fn translate_action_java(action: &str, rhs_len: usize) -> String {
     let mut result = out;
     let mut printf_found = false;
 
-    if let Some(printf_action) = printf_converter::extract_printf_call(&result) {
+    if let Some((printf_action, start_pos, end_pos)) = printf_converter::extract_printf_call(&result) {
         let java_printf = printf_converter::convert_printf_to_java(&printf_action.fmt_str, &printf_action.args);
 
-        let start_pos = result.find("printf(").unwrap_or(0);
-        if start_pos > 0 {
-            let before_printf = &result[..start_pos];
-            result = format!("{}{}", before_printf, java_printf);
-        } else {
-            result = java_printf;
-        }
+        let before_printf = &result[..start_pos];
+        let after_printf = &result[end_pos..];
+        result = format!("{}{}{}", before_printf, java_printf, after_printf);
         printf_found = true;
     }
 
@@ -1272,6 +1290,21 @@ fn generate_python(table: &ParsingTable, grammar: &Grammar) -> Result<String> {
     code.push_str("                    \n");
     code.push_str("            elif act == 'A':  # Accept\n");
     code.push_str("                return value_stack[-1] if len(value_stack) > 1 else None\n");
+
+    if let Some(epilogue) = &grammar.epilogue {
+        let is_c_code = epilogue.contains("#include")
+            || epilogue.contains("void yyerror(")
+            || epilogue.contains("int main(")
+            || epilogue.contains("fprintf(");
+            
+        if !is_c_code {
+            code.push_str("# User epilogue from grammar trailer\n");
+            code.push_str(epilogue);
+            code.push_str("\n\n");
+        } else {
+            code.push_str("# Note: C-style epilogue skipped in Python output\n\n");
+        }
+    }
 
     // Add combined lexer+parser test driver
     code.push_str("\n\n");
@@ -1460,9 +1493,12 @@ fn translate_action_python(action: &str, rhs_len: usize) -> String {
         return "pass  # Complex multi-line C block - manual translation needed".to_string();
     }
 
-    if let Some(action) = printf_converter::extract_printf_call(&result) {
+    if let Some((action, start_pos, end_pos)) = printf_converter::extract_printf_call(&result) {
         let py_printf = printf_converter::convert_printf_to_python(&action.fmt_str, &action.args);
-        result = py_printf;
+        
+        let before_printf = &result[..start_pos];
+        let after_printf = &result[end_pos..];
+        result = format!("{}{}{}", before_printf, py_printf, after_printf);
     }
 
     result = ErrorRecoveryHandler::replace_error_handling_python(&result);

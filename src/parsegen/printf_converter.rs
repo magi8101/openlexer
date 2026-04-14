@@ -93,7 +93,7 @@ impl FormatString {
     }
 }
 
-pub fn extract_printf_call(action: &str) -> Option<PressedAction> {
+pub fn extract_printf_call(action: &str) -> Option<(PressedAction, usize, usize)> {
     let start = action.find("printf(")?;
     let mut pos = start + 7;
 
@@ -182,14 +182,17 @@ pub fn extract_printf_call(action: &str) -> Option<PressedAction> {
             }
         }
 
-        args.push(c);
         pos += 1;
     }
 
-    Some(PressedAction {
-        fmt_str,
-        args: args.trim().to_string(),
-    })
+    Some((
+        PressedAction {
+            fmt_str,
+            args: args.trim().to_string(),
+        },
+        start,
+        pos,
+    ))
 }
 
 pub struct PressedAction {
