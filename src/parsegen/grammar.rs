@@ -173,18 +173,65 @@ impl Grammar {
             for token in tokens_without_literals {
                 // Generate pattern based on token name
                 let pattern = match token.as_str() {
+                    // Numeric types
                     "NUMBER" | "NUM" | "INTEGER" | "INT" | "FLOAT" | "DOUBLE" | "DECIMAL" =>
                         "[0-9]+",
+                    // Identifier types
                     "IDENTIFIER" | "ID" | "NAME" | "VAR" =>
                         "[a-zA-Z_][a-zA-Z0-9_]*",
+                    // String literals
                     "STRING" | "STR" =>
                         "\"([^\"\\\\]|\\\\.)*\"",
+                    // Comments
                     "COMMENT" =>
                         "//.*",
+                    // Arithmetic operators
+                    "PLUS"      => "\\+",
+                    "MINUS"     => "-",
+                    "STAR" | "TIMES" | "MUL" | "MULTIPLY" => "\\*",
+                    "SLASH" | "DIVIDE" | "DIV" => "/",
+                    "PERCENT" | "MOD" | "MODULO" => "%",
+                    "CARET" | "POWER" | "POW"   => "\\^",
+                    // Comparison / relational operators
+                    "EQ" | "EQUAL" | "EQUALS"   => "==",
+                    "NEQ" | "NOTEQUAL" | "NE"   => "!=",
+                    "LTE" | "LE" | "LESSEQUAL"  => "<=",
+                    "GTE" | "GE" | "GREATEREQUAL" => ">=",
+                    "LT" | "LESS"               => "<",
+                    "GT" | "GREATER"            => ">",
+                    // Assignment
+                    "ASSIGN"                    => "=",
+                    // Logical operators
+                    "AND" | "LAND"              => "&&",
+                    "OR"  | "LOR"               => "\\|\\|",
+                    "NOT" | "BANG"              => "!",
+                    // Bitwise operators
+                    "AMP" | "BITAND"            => "&",
+                    "PIPE" | "BITOR"            => "\\|",
+                    "TILDE"                     => "~",
+                    // Delimiters / grouping
+                    "LPAREN"                    => "\\(",
+                    "RPAREN"                    => "\\)",
+                    "LBRACKET" | "LBRACK"       => "\\[",
+                    "RBRACKET" | "RBRACK"       => "\\]",
+                    "LBRACE"                    => "\\{",
+                    "RBRACE"                    => "\\}",
+                    // Punctuation
+                    "SEMICOLON" | "SEMI"        => ";",
+                    "COLON"                     => ":",
+                    "COMMA"                     => ",",
+                    "DOT" | "PERIOD"            => "\\.",
+                    "ARROW"                     => "->",
+                    "DOUBLEARROW" | "FATARROW"   => "=>",
+                    "DOUBLECOLON"               => "::",
+                    "ELLIPSIS"                  => "\\.\\.\\.",
+                    // Newline (explicit)
+                    "NEWLINE" | "NL" | "EOL"    => "\\n",
+                    // Prefix heuristics
                     _ if token.starts_with("NUM") => "[0-9]+",
                     _ if token.starts_with("ID") || token.starts_with("NAME") =>
                         "[a-zA-Z_][a-zA-Z0-9_]*",
-                    // Fallback for other tokens
+                    // Fallback: treat as keyword-like identifier
                     _ => "[a-zA-Z_][a-zA-Z0-9_]*",
                 };
 
