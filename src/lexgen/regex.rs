@@ -9,6 +9,7 @@
 //! - Plus: `a+`
 //! - Question: `a?`
 //! - Grouping: `(a|b)`
+//! - Interval/repetition: `a{2,4}`, `a{3}`, `a{2,}`
 //! - Character classes: `[a-z]`, `[^0-9]`, `[abc]`
 //! - Dot (any char): `.`
 //! - Escape sequences: `\d`, `\w`, `\s`, `\D`, `\W`, `\S`, `\n`, `\t`, etc.
@@ -209,7 +210,7 @@ impl<'a> RegexParser<'a> {
         Ok(lhs)
     }
 
-    /// Parses factors and repetition suffixes: Atom*, Atom+, Atom?
+    /// Parses factors and repetition suffixes: Atom*, Atom+, Atom?, Atom{n,m}
     fn parse_factor(&mut self) -> Result<Regex> {
         let mut atom = self.parse_atom()?;
 
@@ -227,11 +228,118 @@ impl<'a> RegexParser<'a> {
                     self.advance();
                     atom = Regex::Question(Box::new(atom));
                 }
+                '{' => match self.try_parse_interval()? {
+                    Some((min, max)) => atom = Self::desugar_interval(atom, min, max, self.position())?,
+                    // Not well-formed interval syntax (e.g. `{NAME}` that isn't a
+                    // definition, or stray `{`) - leave it for concat to treat as a literal.
+                    None => break,
+                },
                 _ => break,
             }
         }
 
         Ok(atom)
+    }
+
+    /// Attempts to parse a `{n}`, `{n,}` or `{n,m}` repetition count at the
+    /// current position. Returns `Ok(None)` and restores the position if what
+    /// follows `{` isn't valid interval syntax, so the caller can fall back to
+    /// treating `{` as a literal character.
+    fn try_parse_interval(&mut self) -> Result<Option<(u32, Option<u32>)>> {
+        let saved_chars = self.chars.clone();
+        let saved_index = self.current_index;
+
+        self.advance(); // consume '{'
+        let min = match self.parse_digits() {
+            Some(n) => n,
+            None => {
+                self.chars = saved_chars;
+                self.current_index = saved_index;
+                return Ok(None);
+            }
+        };
+
+        let max = if self.consume(',') {
+            self.parse_digits() // None means unbounded: `{n,}`
+        } else {
+            Some(min)
+        };
+
+        if !self.consume('}') {
+            self.chars = saved_chars;
+            self.current_index = saved_index;
+            return Ok(None);
+        }
+
+        if let Some(max) = max {
+            if min > max {
+                return Err(Error::RegexError {
+                    position: self.position(),
+                    message: format!(
+                        "Invalid repetition {{{},{}}}: minimum exceeds maximum",
+                        min, max
+                    ),
+                });
+            }
+        }
+
+        Ok(Some((min, max)))
+    }
+
+    /// Parses a run of ASCII digits, returning `None` if there are none.
+    fn parse_digits(&mut self) -> Option<u32> {
+        let mut digits = String::new();
+        while let Some(c) = self.peek() {
+            if !c.is_ascii_digit() {
+                break;
+            }
+            digits.push(c);
+            self.advance();
+        }
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok()
+        }
+    }
+
+    /// Desugars `atom{min,max}` into existing Concat/Star/Question nodes:
+    /// `min` required copies of `atom`, followed by either `(max - min)`
+    /// optional copies (`{min,max}`) or a trailing `Star` (`{min,}`).
+    ///
+    /// ponytail: caps total copies at 1000 to avoid quadratic AST/NFA blowup
+    /// from something like `a{100000}`; raise the cap if a real spec needs it.
+    fn desugar_interval(atom: Regex, min: u32, max: Option<u32>, position: usize) -> Result<Regex> {
+        const MAX_COPIES: u32 = 1000;
+        if min > MAX_COPIES || max.is_some_and(|m| m > MAX_COPIES) {
+            return Err(Error::RegexError {
+                position,
+                message: format!("Repetition count too large (max {})", MAX_COPIES),
+            });
+        }
+
+        let mut result: Option<Regex> = None;
+        let push = |result: &mut Option<Regex>, next: Regex| {
+            *result = Some(match result.take() {
+                None => next,
+                Some(prev) => Regex::Concat(Box::new(prev), Box::new(next)),
+            });
+        };
+
+        for _ in 0..min {
+            push(&mut result, atom.clone());
+        }
+
+        match max {
+            None => push(&mut result, Regex::Star(Box::new(atom))),
+            Some(max) => {
+                for _ in 0..(max - min) {
+                    push(&mut result, Regex::Question(Box::new(atom.clone())));
+                }
+            }
+        }
+
+        Ok(result.unwrap_or(Regex::Empty))
     }
 
     /// Parses atoms: (Expr), [CharClass], ., Escaped chars, Literals
@@ -901,5 +1009,78 @@ mod tests {
         // Missing closing brace
         let result = RegexAst::parse("\\p{Lu");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_interval_exact() {
+        // a{3} == aaa
+        let ast = RegexAst::parse("a{3}").unwrap();
+        let expected = Regex::Concat(
+            Box::new(Regex::Concat(
+                Box::new(Regex::Literal('a')),
+                Box::new(Regex::Literal('a')),
+            )),
+            Box::new(Regex::Literal('a')),
+        );
+        assert_eq!(ast.root, expected);
+    }
+
+    #[test]
+    fn test_interval_at_least() {
+        // a{2,} == aaa*
+        let ast = RegexAst::parse("a{2,}").unwrap();
+        let expected = Regex::Concat(
+            Box::new(Regex::Concat(
+                Box::new(Regex::Literal('a')),
+                Box::new(Regex::Literal('a')),
+            )),
+            Box::new(Regex::Star(Box::new(Regex::Literal('a')))),
+        );
+        assert_eq!(ast.root, expected);
+    }
+
+    #[test]
+    fn test_interval_range() {
+        // a{1,3} == a a? a?
+        let ast = RegexAst::parse("a{1,3}").unwrap();
+        let expected = Regex::Concat(
+            Box::new(Regex::Concat(
+                Box::new(Regex::Literal('a')),
+                Box::new(Regex::Question(Box::new(Regex::Literal('a')))),
+            )),
+            Box::new(Regex::Question(Box::new(Regex::Literal('a')))),
+        );
+        assert_eq!(ast.root, expected);
+    }
+
+    #[test]
+    fn test_interval_zero_exact_is_empty() {
+        let ast = RegexAst::parse("a{0}").unwrap();
+        assert_eq!(ast.root, Regex::Empty);
+    }
+
+    #[test]
+    fn test_interval_min_greater_than_max_errors() {
+        assert!(RegexAst::parse("a{5,2}").is_err());
+    }
+
+    #[test]
+    fn test_interval_too_large_errors() {
+        assert!(RegexAst::parse("a{99999}").is_err());
+    }
+
+    #[test]
+    fn test_brace_without_digits_is_literal() {
+        // `{x}` isn't valid interval syntax, so every char is a literal -
+        // matches Flex's behavior for a malformed/non-definition `{...}`.
+        let ast = RegexAst::parse("{x}").unwrap();
+        let expected = Regex::Concat(
+            Box::new(Regex::Concat(
+                Box::new(Regex::Literal('{')),
+                Box::new(Regex::Literal('x')),
+            )),
+            Box::new(Regex::Literal('}')),
+        );
+        assert_eq!(ast.root, expected);
     }
 }
