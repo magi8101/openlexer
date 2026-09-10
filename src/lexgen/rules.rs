@@ -346,6 +346,19 @@ impl LexerSpec {
                 continue;
             }
 
+            // Strip a trailing "// ..." or "/* ... */" comment (e.g.
+            // "%x COMMENT   /* Exclusive start condition */") before any of
+            // the parsing below, so a %s/%x's condition-name list or a named
+            // definition doesn't swallow words out of the comment itself -
+            // "%x COMMENT /* Exclusive start condition */" would otherwise
+            // register "/*", "Exclusive", "start", "condition" and "*/" as
+            // additional bogus start conditions. Comment markers inside a
+            // quoted string aren't treated as starting a comment.
+            let trimmed = strip_trailing_comment(trimmed).trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+
             // Inclusive start condition: %s NAME1 NAME2 ...
             if trimmed.starts_with("%s") {
                 let names = trimmed[2..].split_whitespace();
@@ -726,6 +739,29 @@ impl LexerSpec {
     pub fn condition_names(&self) -> Vec<&str> {
         self.start_conditions.keys().map(|s| s.as_str()).collect()
     }
+}
+
+/// Strips a trailing `// ...` or `/* ... */` comment from a single
+/// definitions-section line, leaving everything before it. A comment marker
+/// inside a quoted string doesn't count, so a named definition like
+/// `SLASH "/*"` keeps its pattern intact. Doesn't handle a `/* */` comment
+/// with real content *after* it on the same line - matches this parser's
+/// existing "simple single-line" comment handling elsewhere.
+fn strip_trailing_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut chars = line.char_indices().peekable();
+    while let Some((idx, c)) = chars.next() {
+        if c == '"' {
+            in_string = !in_string;
+        } else if c == '/' && !in_string {
+            if let Some(&(_, next_c)) = chars.peek() {
+                if next_c == '/' || next_c == '*' {
+                    return &line[..idx];
+                }
+            }
+        }
+    }
+    line
 }
 
 /// Parses a definition line: NAME  pattern
@@ -1282,6 +1318,49 @@ ALPHA   [a-zA-Z]
         assert_eq!(spec.rules[0].start_conditions, vec!["COMMENT"]);
         assert_eq!(spec.rules[1].start_conditions, vec!["STRING"]);
         assert!(spec.rules[2].start_conditions.is_empty()); // No explicit condition
+    }
+
+    #[test]
+    fn test_start_condition_with_trailing_comment() {
+        // Regression test: "%x COMMENT   /* Exclusive start condition */"
+        // used to register every whitespace-separated word in the trailing
+        // comment ("/*", "Exclusive", "start", "condition", "*/") as its own
+        // bogus start condition, since %s/%x parsing just split everything
+        // after the directive on whitespace with no comment awareness.
+        let input = r#"
+%x COMMENT   /* Exclusive start condition */
+%s STRING    /* Inclusive start condition */
+%%
+[a-z]+          ID
+"#;
+        let spec = LexerSpec::parse(input).unwrap();
+        assert_eq!(spec.start_conditions.len(), 3); // INITIAL, COMMENT, STRING only
+        assert_eq!(
+            spec.start_conditions.get("COMMENT"),
+            Some(&StartConditionType::Exclusive)
+        );
+        assert_eq!(
+            spec.start_conditions.get("STRING"),
+            Some(&StartConditionType::Inclusive)
+        );
+        for bogus in ["/*", "*/", "Exclusive", "Inclusive", "start", "condition"] {
+            assert!(
+                !spec.start_conditions.contains_key(bogus),
+                "'{}' should not have been registered as a start condition",
+                bogus
+            );
+        }
+    }
+
+    #[test]
+    fn test_named_definition_with_trailing_comment() {
+        let input = r#"
+DIGIT   [0-9]   // digits
+%%
+{DIGIT}+        NUMBER
+"#;
+        let spec = LexerSpec::parse(input).unwrap();
+        assert_eq!(spec.definitions.get("DIGIT"), Some(&"[0-9]".to_string()));
     }
 
     #[test]
