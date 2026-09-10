@@ -57,6 +57,11 @@ pub struct LexerRule {
     /// re-scans the matched text against this pattern alone to find where r1
     /// ends, so only r1's text becomes the token and r2 is left unconsumed.
     pub trailing_context: Option<RegexAst>,
+    /// `r2` from a `r1/r2` pattern, alongside `trailing_context` (r1). Used to
+    /// verify a candidate r1 boundary: the remaining suffix must be an exact
+    /// match for r2, not just any accepted r1 prefix - this is what makes
+    /// e.g. `a*/a` split correctly instead of r1 greedily eating everything.
+    pub trailing_context_r2: Option<RegexAst>,
     /// Line number in the source file (for error messages).
     pub line_number: usize,
 }
@@ -599,34 +604,35 @@ impl LexerSpec {
         // without consuming r2. Split on a top-level '/' (not inside [...]
         // or (...), not escaped) if there is one. Checked after stripping
         // '^' above, so `^foo/bar` anchors foo and treats bar as trailing.
-        let (regex, pattern, trailing_context) = match find_trailing_context_split(&pattern) {
-            Some(split_at) => {
-                let r1_text = &pattern[..split_at];
-                let r2_text = &pattern[split_at + 1..];
-                let r1 = RegexAst::parse(r1_text).map_err(|e| Error::LexerSpecError {
-                    line: line_number,
-                    message: format!("Invalid trailing context pattern '{}': {}", r1_text, e),
-                })?;
-                let r2 = RegexAst::parse(r2_text).map_err(|e| Error::LexerSpecError {
-                    line: line_number,
-                    message: format!("Invalid trailing context pattern '{}': {}", r2_text, e),
-                })?;
-                let combined = RegexAst {
-                    root: crate::lexgen::regex::Regex::Concat(
-                        Box::new(r1.root.clone()),
-                        Box::new(r2.root),
-                    ),
-                };
-                (combined, pattern, Some(r1))
-            }
-            None => {
-                let regex = RegexAst::parse(&pattern).map_err(|e| Error::LexerSpecError {
-                    line: line_number,
-                    message: format!("Invalid pattern '{}': {}", pattern, e),
-                })?;
-                (regex, pattern, None)
-            }
-        };
+        let (regex, pattern, trailing_context, trailing_context_r2) =
+            match find_trailing_context_split(&pattern) {
+                Some(split_at) => {
+                    let r1_text = &pattern[..split_at];
+                    let r2_text = &pattern[split_at + 1..];
+                    let r1 = RegexAst::parse(r1_text).map_err(|e| Error::LexerSpecError {
+                        line: line_number,
+                        message: format!("Invalid trailing context pattern '{}': {}", r1_text, e),
+                    })?;
+                    let r2 = RegexAst::parse(r2_text).map_err(|e| Error::LexerSpecError {
+                        line: line_number,
+                        message: format!("Invalid trailing context pattern '{}': {}", r2_text, e),
+                    })?;
+                    let combined = RegexAst {
+                        root: crate::lexgen::regex::Regex::Concat(
+                            Box::new(r1.root.clone()),
+                            Box::new(r2.root.clone()),
+                        ),
+                    };
+                    (combined, pattern, Some(r1), Some(r2))
+                }
+                None => {
+                    let regex = RegexAst::parse(&pattern).map_err(|e| Error::LexerSpecError {
+                        line: line_number,
+                        message: format!("Invalid pattern '{}': {}", pattern, e),
+                    })?;
+                    (regex, pattern, None, None)
+                }
+            };
 
         // Parse the action
         let action = parse_action(&action_str);
@@ -639,6 +645,7 @@ impl LexerSpec {
                 start_conditions,
                 anchored_start,
                 trailing_context,
+                trailing_context_r2,
                 line_number,
             },
             1 + extra_lines,
