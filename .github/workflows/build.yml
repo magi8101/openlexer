@@ -12,7 +12,10 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  # Scoped per ref: a push to one branch/PR should only cancel its own
+  # in-flight run, not every other branch's build-wasm check. main/master
+  # still serializes on itself, so real Pages deploys stay one-at-a-time.
+  group: "pages-${{ github.ref }}"
   cancel-in-progress: true
 
 jobs:
