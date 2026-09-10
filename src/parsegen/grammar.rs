@@ -224,6 +224,34 @@ impl<'a> GrammarParser<'a> {
             }
         }
 
+        // 6. Validate that every symbol used in a rule body which parse_rhs
+        // classified as a NonTerminal (i.e. it wasn't a declared %token)
+        // actually has at least one rule of its own. A name that's neither
+        // declared as a token nor ever the LHS of a rule is essentially
+        // always a missing %token declaration (e.g. LPAREN used in a rule
+        // but never %token-ed) rather than a deliberately production-less
+        // nonterminal - Bison itself treats this as a hard error ("symbol
+        // X is used, but is not defined as a token and has no rules").
+        // `error` is Bison's reserved error-recovery pseudo-terminal: it's
+        // never declared via %token and never a rule's LHS, so it's exempt.
+        let defined_nonterminals: std::collections::HashSet<&str> =
+            self.grammar.rules.iter().map(|r| r.lhs.as_str()).collect();
+        for rule in &self.grammar.rules {
+            for sym in &rule.rhs {
+                if let Symbol::NonTerminal(name) = sym {
+                    if name != "error" && !defined_nonterminals.contains(name.as_str()) {
+                        return Err(Error::GrammarError {
+                            line: self.line,
+                            message: format!(
+                                "symbol '{}' is used in rule '{}' but is not declared as a %token and has no rules of its own - missing a %token declaration?",
+                                name, rule.lhs
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(self.grammar.clone())
     }
 
@@ -1568,5 +1596,67 @@ expr: NUM ;
 %%
 "#;
         assert!(Grammar::parse(input).is_err());
+    }
+
+    #[test]
+    fn test_undeclared_token_in_rule_errors() {
+        // LPAREN/RPAREN used in a rule but never declared via %token, and
+        // never the LHS of any rule - almost always a missing %token line,
+        // not a deliberately empty nonterminal. Without this check,
+        // parse_rhs() silently classifies them as NonTerminals with zero
+        // productions, producing a parser that can never actually match
+        // parentheses.
+        let input = r#"
+%token NUMBER PLUS
+
+%%
+
+expr:
+    expr PLUS expr
+  | LPAREN expr RPAREN
+  | NUMBER
+  ;
+
+%%
+"#;
+        let err = Grammar::parse(input).unwrap_err().to_string();
+        assert!(err.contains("LPAREN"), "error should name the symbol: {}", err);
+    }
+
+    #[test]
+    fn test_error_recovery_token_is_exempt_from_undeclared_check() {
+        // Bison's reserved `error` pseudo-terminal is never declared via
+        // %token and never a rule's LHS - it must not trip the undeclared-
+        // symbol check that catches genuine typos like LPAREN above.
+        let input = r#"
+%token NUMBER NEWLINE
+
+%%
+
+line:
+    NUMBER NEWLINE
+  | error NEWLINE
+  ;
+
+%%
+"#;
+        assert!(Grammar::parse(input).is_ok());
+    }
+
+    #[test]
+    fn test_properly_declared_token_in_rule_is_fine() {
+        let input = r#"
+%token NUMBER LPAREN RPAREN
+
+%%
+
+expr:
+    LPAREN expr RPAREN
+  | NUMBER
+  ;
+
+%%
+"#;
+        assert!(Grammar::parse(input).is_ok());
     }
 }
