@@ -51,6 +51,12 @@ pub struct LexerRule {
     /// stripped from `pattern`/`regex` before parsing. The rule only matches when
     /// the previous character consumed was a newline, or at the start of input.
     pub anchored_start: bool,
+    /// Trailing context: for a pattern written `r1/r2`, this holds `r1` alone.
+    /// `regex` above is the full `r1r2` concatenation (used for matching and
+    /// priority like any other rule); at match time the generated lexer
+    /// re-scans the matched text against this pattern alone to find where r1
+    /// ends, so only r1's text becomes the token and r2 is left unconsumed.
+    pub trailing_context: Option<RegexAst>,
     /// Line number in the source file (for error messages).
     pub line_number: usize,
 }
@@ -589,11 +595,38 @@ impl LexerSpec {
             None => (false, pattern),
         };
 
-        // Parse the regex pattern
-        let regex = RegexAst::parse(&pattern).map_err(|e| Error::LexerSpecError {
-            line: line_number,
-            message: format!("Invalid pattern '{}': {}", pattern, e),
-        })?;
+        // Trailing context: `r1/r2` matches r1 but only when followed by r2,
+        // without consuming r2. Split on a top-level '/' (not inside [...]
+        // or (...), not escaped) if there is one. Checked after stripping
+        // '^' above, so `^foo/bar` anchors foo and treats bar as trailing.
+        let (regex, pattern, trailing_context) = match find_trailing_context_split(&pattern) {
+            Some(split_at) => {
+                let r1_text = &pattern[..split_at];
+                let r2_text = &pattern[split_at + 1..];
+                let r1 = RegexAst::parse(r1_text).map_err(|e| Error::LexerSpecError {
+                    line: line_number,
+                    message: format!("Invalid trailing context pattern '{}': {}", r1_text, e),
+                })?;
+                let r2 = RegexAst::parse(r2_text).map_err(|e| Error::LexerSpecError {
+                    line: line_number,
+                    message: format!("Invalid trailing context pattern '{}': {}", r2_text, e),
+                })?;
+                let combined = RegexAst {
+                    root: crate::lexgen::regex::Regex::Concat(
+                        Box::new(r1.root.clone()),
+                        Box::new(r2.root),
+                    ),
+                };
+                (combined, pattern, Some(r1))
+            }
+            None => {
+                let regex = RegexAst::parse(&pattern).map_err(|e| Error::LexerSpecError {
+                    line: line_number,
+                    message: format!("Invalid pattern '{}': {}", pattern, e),
+                })?;
+                (regex, pattern, None)
+            }
+        };
 
         // Parse the action
         let action = parse_action(&action_str);
@@ -605,6 +638,7 @@ impl LexerSpec {
                 action,
                 start_conditions,
                 anchored_start,
+                trailing_context,
                 line_number,
             },
             1 + extra_lines,
@@ -887,6 +921,34 @@ fn has_multiple_statements(code: &str) -> bool {
     false
 }
 
+/// Finds the byte index of a top-level trailing-context `/` in a pattern
+/// (as in Flex's `r1/r2`), i.e. one that isn't escaped and isn't inside a
+/// `[...]` character class or a `(...)` group - trailing context is only
+/// meaningful at the outermost level of a rule's pattern. Returns `None` if
+/// there is no such `/` (the common case: plain patterns are unaffected).
+fn find_trailing_context_split(pattern: &str) -> Option<usize> {
+    let mut depth_bracket = 0i32;
+    let mut depth_paren = 0i32;
+    let mut escaped = false;
+
+    for (idx, c) in pattern.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = (depth_bracket - 1).max(0),
+            '(' if depth_bracket == 0 => depth_paren += 1,
+            ')' if depth_bracket == 0 => depth_paren = (depth_paren - 1).max(0),
+            '/' if depth_bracket == 0 && depth_paren == 0 => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Splits input into sections by %% that appears at start of line.
 fn split_sections(input: &str) -> Vec<String> {
     let mut sections = Vec::new();
@@ -931,10 +993,12 @@ fn convert_quoted_pattern(quoted: &str) -> String {
                 }
             }
         } else {
-            // Escape regex metacharacters
+            // Escape regex metacharacters. '/' is included because it's the
+            // trailing-context operator (r1/r2) - a quoted "/" must stay a
+            // literal slash, e.g. "/" { return DIVIDE; }.
             match c {
                 '(' | ')' | '[' | ']' | '{' | '}' | '.' | '*' | '+' | '?' | '^' | '$' | '|'
-                | '\\' => {
+                | '\\' | '/' => {
                     result.push('\\');
                     result.push(c);
                 }
@@ -1299,5 +1363,74 @@ return 1;
         // Quoted "+" becomes escaped \+
         assert_eq!(spec.rules[1].pattern, "\\+");
         assert_eq!(spec.rules[1].action, RuleAction::Token("PLUS".to_string()));
+    }
+
+    #[test]
+    fn test_trailing_context_split() {
+        let input = r#"
+%%
+[a-zA-Z]+/:  { return LABEL; }
+%%
+"#;
+        let spec = LexerSpec::parse(input).unwrap();
+        assert_eq!(spec.rules.len(), 1);
+        // pattern keeps the original r1/r2 text for display...
+        assert_eq!(spec.rules[0].pattern, "[a-zA-Z]+/:");
+        // ...but trailing_context holds r1 alone.
+        let r1 = spec.rules[0]
+            .trailing_context
+            .as_ref()
+            .expect("expected trailing context");
+        match &r1.root {
+            crate::lexgen::regex::Regex::Plus(_) => {}
+            other => panic!("expected Plus(...) for r1, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_trailing_context_without_slash() {
+        let input = r#"
+%%
+[a-zA-Z]+  { return WORD; }
+%%
+"#;
+        let spec = LexerSpec::parse(input).unwrap();
+        assert!(spec.rules[0].trailing_context.is_none());
+    }
+
+    #[test]
+    fn test_quoted_slash_is_not_trailing_context() {
+        // "/" (division) must stay a literal slash, not the trailing-context operator.
+        let input = r#"
+%%
+"/" { return DIVIDE; }
+%%
+"#;
+        let spec = LexerSpec::parse(input).unwrap();
+        assert!(spec.rules[0].trailing_context.is_none());
+        assert_eq!(spec.rules[0].pattern, "\\/");
+    }
+
+    #[test]
+    fn test_slash_inside_char_class_is_not_trailing_context() {
+        // A '/' inside [...] is just part of the class, not the operator.
+        let input = r#"
+%%
+[a/b]+  { return WEIRD; }
+%%
+"#;
+        let spec = LexerSpec::parse(input).unwrap();
+        assert!(spec.rules[0].trailing_context.is_none());
+    }
+
+    #[test]
+    fn test_escaped_slash_is_not_trailing_context() {
+        let input = r#"
+%%
+a\/b  { return SLASHED; }
+%%
+"#;
+        let spec = LexerSpec::parse(input).unwrap();
+        assert!(spec.rules[0].trailing_context.is_none());
     }
 }
