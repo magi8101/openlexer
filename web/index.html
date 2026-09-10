@@ -153,45 +153,58 @@
             return '';
         }
 
-        // --- Execution: Wandbox, called directly from the browser (no proxy) ---
-        // Wandbox's public API sets Access-Control-Allow-Origin: *, so it can be
-        // called straight from client-side JS - no backend needed just to get
-        // around CORS. https://github.com/melpon/wandbox/blob/master/kennel2/API.rst
-        const WANDBOX_URL = "https://wandbox.org/api/compile.json";
-
-        async function runOnWandbox(compiler, files, stdin) {
+        // --- Execution: Compiler Explorer (godbolt.org), called directly from
+        // the browser (no proxy). Its API sets Access-Control-Allow-Origin: *,
+        // so - same as Wandbox before it - no backend is needed just to get
+        // around CORS. Switched from Wandbox because its execution sandbox was
+        // returning HTTP 500 ("Failed to get uid...", a Podman-level failure
+        // on their infrastructure) for every request; Compiler Explorer is
+        // more heavily used/maintained infrastructure.
+        // https://github.com/compiler-explorer/compiler-explorer/blob/main/docs/API.md
+        //
+        // One real constraint: the API compiles a single in-memory file per
+        // request (no multi-file support like Wandbox's `codes` array), always
+        // saved server-side as "example.<ext>" regardless of what we call it.
+        async function runOnGodbolt(compilerId, source, stdin) {
             try {
-                const body = { compiler, stdin: stdin || "" };
-                if (files.length > 1) {
-                    body.code = "";
-                    body.codes = files.map(f => ({ file: f.name, code: f.content }));
-                } else {
-                    body.code = files[0].content;
-                }
-
-                const response = await fetch(WANDBOX_URL, {
+                const response = await fetch(`https://godbolt.org/api/compiler/${compilerId}/compile`, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(body)
+                    headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                    body: JSON.stringify({
+                        source,
+                        options: {
+                            userArguments: "",
+                            executeParameters: { args: [], stdin: stdin || "" },
+                            compilerOptions: { executorRequest: true },
+                            filters: { execute: true }
+                        }
+                    })
                 });
 
                 if (!response.ok) {
-                    throw new Error(`Wandbox API Error: ${response.status} ${response.statusText}`);
+                    throw new Error(`Compiler Explorer API Error: ${response.status} ${response.statusText}`);
                 }
 
                 const result = await response.json();
+                // GCC/Clang diagnostics come back with raw ANSI color escape
+                // codes (e.g. compile errors); strip them since this is
+                // rendered as plain text, not a terminal.
+                const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+                const join = (lines) => stripAnsi((lines || []).map(l => l.text).join("\n"));
                 let output = "";
 
-                if (result.compiler_error) {
-                    output += "[Compiler Error]\n" + result.compiler_error + "\n";
+                if (!result.didExecute) {
+                    // Compilation itself failed before execution could start;
+                    // the compiler's diagnostics are what's useful here.
+                    output += "[Compilation Error]\n";
+                    output += join(result.buildResult && result.buildResult.stderr) || join(result.stderr);
+                    return output;
                 }
-                if (result.status !== "0") {
-                    output += `[Runtime Error (Exit Code: ${result.status})]\n`;
+                if (result.code !== 0) {
+                    output += `[Runtime Error (Exit Code: ${result.code})]\n`;
+                    output += join(result.stderr) + "\n";
                 }
-                if (result.program_error) {
-                    output += result.program_error + "\n";
-                }
-                output += result.program_message || "";
+                output += join(result.stdout);
                 return output;
             } catch (e) {
                 return `Execution Error: ${e.message}\n(Check internet connection)`;
@@ -200,32 +213,35 @@
 
         // --- Python ---
         async function runPython(code, testInput, extraCode = "") {
-            const files = [{ name: "main.py", content: code }];
+            let source = code;
             if (extraCode && extraCode.trim().length > 0) {
-                files.push({ name: "lexer.py", content: extraCode });
+                // No multi-file support here (unlike the old backend/Wandbox),
+                // so concatenate lexer + parser into one script and drop the
+                // now-pointless "from lexer import ..." line - both files'
+                // top-level definitions land in the same module namespace
+                // either way, so nothing after that needs to change.
+                const withoutImport = code.replace(/^\s*(from lexer import .*|import lexer)\s*$/m, "");
+                source = extraCode + "\n" + withoutImport;
             }
-            return runOnWandbox("cpython-3.11.10", files, testInput);
+            return runOnGodbolt("python312", source, testInput);
         }
 
         // --- C ---
         async function runC(code, testInput) {
-            return runOnWandbox("gcc-13.2.0-c", [{ name: "main.c", content: code }], testInput);
+            return runOnGodbolt("cg162", code, testInput);
         }
 
         // --- Java ---
         async function runJava(code, testInput) {
-            // Pick a sensible source filename from code content - Java requires
-            // the file to be named after its public class.
-            let javaFileName = "Main.java";
-            const publicClassMatch = code.match(/public\s+class\s+([A-Za-z_][A-Za-z0-9_]*)/);
-            if (publicClassMatch && publicClassMatch[1]) {
-                javaFileName = `${publicClassMatch[1]}.java`;
-            } else if (/\bclass\s+Parser\b/.test(code) && !/\bclass\s+Lexer\b/.test(code)) {
-                javaFileName = "Parser.java";
-            } else if (/\bclass\s+Lexer\b/.test(code)) {
-                javaFileName = "Lexer.java";
-            }
-            return runOnWandbox("openjdk-jdk-21+35", [{ name: javaFileName, content: code }], testInput);
+            // Compiler Explorer always saves the source as "example.java"
+            // server-side, so a `public class X` (which Java requires to
+            // match the filename) fails to compile no matter what we name it
+            // in the request. A non-public top-level class has no such
+            // requirement, so just drop `public` from the class we're running
+            // - safe here since generated Lexer/Parser code declares exactly
+            // one top-level class per file.
+            const runnable = code.replace(/\bpublic\s+class\b/, "class");
+            return runOnGodbolt("java2501", runnable, testInput);
         }
     </script>
 </head>
