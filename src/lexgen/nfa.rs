@@ -121,7 +121,10 @@ impl Nfa {
     /// - Rules with no start conditions are included if condition_type is Inclusive
     /// - Rules with explicit start conditions are included if condition matches
     /// - The <*> condition (represented by having all conditions) is handled by the caller
-    pub fn from_lexer_spec_for_condition(spec: &LexerSpec, condition: &str) -> Result<Self> {
+    /// - If `bol` is false, `^`-anchored rules are excluded entirely (they can only
+    ///   match at the beginning of a line); if `bol` is true, all active rules are
+    ///   included (a `^`-anchored rule's `^` was already stripped by the parser).
+    pub fn from_lexer_spec_for_condition(spec: &LexerSpec, condition: &str, bol: bool) -> Result<Self> {
         use crate::lexgen::rules::StartConditionType;
 
         let mut nfa = Nfa::new();
@@ -147,7 +150,7 @@ impl Nfa {
                 rule.start_conditions.iter().any(|c| c == condition)
             };
 
-            if !is_active {
+            if !is_active || (!bol && rule.anchored_start) {
                 continue;
             }
 
@@ -163,6 +166,29 @@ impl Nfa {
         }
 
         Ok(nfa)
+    }
+
+    /// Returns true if any rule active in `condition` is `^`-anchored, i.e.
+    /// whether that condition needs a distinct non-beginning-of-line DFA at all.
+    pub fn condition_has_bol_rules(spec: &LexerSpec, condition: &str) -> bool {
+        use crate::lexgen::rules::StartConditionType;
+
+        let condition_type = spec
+            .start_conditions
+            .get(condition)
+            .copied()
+            .unwrap_or(StartConditionType::Inclusive);
+
+        spec.rules.iter().any(|rule| {
+            if !rule.anchored_start {
+                return false;
+            }
+            if rule.start_conditions.is_empty() {
+                condition_type == StartConditionType::Inclusive
+            } else {
+                rule.start_conditions.iter().any(|c| c == condition)
+            }
+        })
     }
 
     /// Recursively builds NFA subgraph for the regex.

@@ -506,7 +506,7 @@ impl OpenLexerApp {
                 );
 
                 // Build NFA and DFA for the INITIAL condition and cache them
-                match Nfa::from_lexer_spec_for_condition(&spec, "INITIAL") {
+                match Nfa::from_lexer_spec_for_condition(&spec, "INITIAL", true) {
                     Ok(nfa) => {
                         self.log(
                             LogLevel::Info,

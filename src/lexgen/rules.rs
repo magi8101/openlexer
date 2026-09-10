@@ -47,6 +47,10 @@ pub struct LexerRule {
     /// Start conditions this rule is active in. Empty means all conditions (for inclusive)
     /// or just INITIAL (for rules without explicit conditions).
     pub start_conditions: Vec<String>,
+    /// True if the pattern had a leading `^` (beginning-of-line anchor), which is
+    /// stripped from `pattern`/`regex` before parsing. The rule only matches when
+    /// the previous character consumed was a newline, or at the start of input.
+    pub anchored_start: bool,
     /// Line number in the source file (for error messages).
     pub line_number: usize,
 }
@@ -576,6 +580,15 @@ impl LexerSpec {
             split_pattern_action_flex(remaining, lines, start_idx, line_number)?;
         let pattern = self.expand_definitions(&pattern_raw);
 
+        // A leading '^' anchors the rule to the beginning of a line (start of
+        // input, or right after a newline was consumed). Strip it before
+        // parsing the regex; the anchor is checked by the generated lexer at
+        // match time, not by the NFA/DFA itself.
+        let (anchored_start, pattern) = match pattern.strip_prefix('^') {
+            Some(rest) => (true, rest.to_string()),
+            None => (false, pattern),
+        };
+
         // Parse the regex pattern
         let regex = RegexAst::parse(&pattern).map_err(|e| Error::LexerSpecError {
             line: line_number,
@@ -591,6 +604,7 @@ impl LexerSpec {
                 regex,
                 action,
                 start_conditions,
+                anchored_start,
                 line_number,
             },
             1 + extra_lines,
