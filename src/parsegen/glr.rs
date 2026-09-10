@@ -1239,6 +1239,7 @@ mod tests {
             ],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         // Rule 1: expr -> NUM
@@ -1247,6 +1248,7 @@ mod tests {
             rhs: vec![Symbol::Terminal("NUM".to_string())],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         grammar
@@ -1281,6 +1283,7 @@ mod tests {
             ],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         // Rule 1: stmt -> IF EXPR THEN stmt
@@ -1294,6 +1297,7 @@ mod tests {
             ],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         // Rule 2: stmt -> OTHER
@@ -1302,6 +1306,7 @@ mod tests {
             rhs: vec![Symbol::Terminal("OTHER".to_string())],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         grammar
@@ -1324,6 +1329,7 @@ mod tests {
             )],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         let table = ParsingTable::build(&grammar).expect("Failed to build parsing table");
@@ -1737,6 +1743,7 @@ mod tests {
             )],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         let table = ParsingTable::build(&grammar).expect("Failed to build parsing table");
@@ -1769,6 +1776,7 @@ mod tests {
             )],
             action: None,
             precedence_sym: None,
+            line: 0, // test-only synthetic grammar, no real source location
         });
 
         let table = ParsingTable::build(&grammar).expect("Failed to build parsing table");

@@ -85,6 +85,11 @@ pub struct Rule {
     pub rhs: Vec<Symbol>,
     pub action: Option<String>,
     pub precedence_sym: Option<String>,
+    /// Source line this production starts on (1-based), for error messages.
+    /// 0 for synthetic rules with no real source location (e.g. the
+    /// augmented start rule, or rules built directly in Rust rather than
+    /// parsed from a grammar file).
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -224,6 +229,34 @@ impl<'a> GrammarParser<'a> {
             }
         }
 
+        // 6. Validate that every symbol used in a rule body which parse_rhs
+        // classified as a NonTerminal (i.e. it wasn't a declared %token)
+        // actually has at least one rule of its own. A name that's neither
+        // declared as a token nor ever the LHS of a rule is essentially
+        // always a missing %token declaration (e.g. LPAREN used in a rule
+        // but never %token-ed) rather than a deliberately production-less
+        // nonterminal - Bison itself treats this as a hard error ("symbol
+        // X is used, but is not defined as a token and has no rules").
+        // `error` is Bison's reserved error-recovery pseudo-terminal: it's
+        // never declared via %token and never a rule's LHS, so it's exempt.
+        let defined_nonterminals: std::collections::HashSet<&str> =
+            self.grammar.rules.iter().map(|r| r.lhs.as_str()).collect();
+        for rule in &self.grammar.rules {
+            for sym in &rule.rhs {
+                if let Symbol::NonTerminal(name) = sym {
+                    if name != "error" && !defined_nonterminals.contains(name.as_str()) {
+                        return Err(Error::GrammarError {
+                            line: rule.line,
+                            message: format!(
+                                "symbol '{}' is used in rule '{}' but is not declared as a %token and has no rules of its own - missing a %token declaration?",
+                                name, rule.lhs
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(self.grammar.clone())
     }
 
@@ -249,7 +282,7 @@ impl<'a> GrammarParser<'a> {
             // Skip whitespace
             while let Some(c) = self.input[self.pos..].chars().next() {
                 if c.is_whitespace() {
-                    self.pos += c.len_utf8();
+                    self.advance(); // tracks '\n' for accurate line numbers
                 } else {
                     break;
                 }
@@ -679,6 +712,9 @@ impl<'a> GrammarParser<'a> {
 
             // Parse alternatives
             loop {
+                self.skip_whitespace_and_comments();
+                let alt_line = self.line;
+
                 // Use the new signature to capture rhs, action, and precedence
                 let (rhs, action, prec) = self.parse_rhs()?;
 
@@ -693,6 +729,7 @@ impl<'a> GrammarParser<'a> {
                     rhs,
                     action,
                     precedence_sym: prec,
+                    line: alt_line,
                 });
 
                 self.skip_whitespace_and_comments();
@@ -748,6 +785,7 @@ impl<'a> GrammarParser<'a> {
                         rhs: vec![], // Empty RHS (epsilon production)
                         action: Some(action),
                         precedence_sym: None,
+                        line: self.line,
                     });
 
                     // Add synthetic nonterminal to the current RHS
@@ -898,7 +936,7 @@ impl<'a> GrammarParser<'a> {
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.input[self.pos..].chars().next() {
             if c.is_whitespace() {
-                self.pos += c.len_utf8();
+                self.advance(); // tracks '\n' for accurate line numbers
             } else {
                 break;
             }
@@ -1268,6 +1306,13 @@ impl<'a> GrammarParser<'a> {
                 rhs,
                 action: None,
                 precedence_sym: None,
+                // Textbook notation classifies every non-LHS symbol as a
+                // Terminal (auto-declaring it), so it can never produce the
+                // "NonTerminal with no rules" case the validation below
+                // checks for - no real per-rule line to track here anyway,
+                // since this path parses the whole input as one blob rather
+                // than tracking a line cursor.
+                line: 0,
             });
         }
 
@@ -1568,5 +1613,109 @@ expr: NUM ;
 %%
 "#;
         assert!(Grammar::parse(input).is_err());
+    }
+
+    #[test]
+    fn test_undeclared_token_in_rule_errors() {
+        // LPAREN/RPAREN used in a rule but never declared via %token, and
+        // never the LHS of any rule - almost always a missing %token line,
+        // not a deliberately empty nonterminal. Without this check,
+        // parse_rhs() silently classifies them as NonTerminals with zero
+        // productions, producing a parser that can never actually match
+        // parentheses.
+        let input = r#"
+%token NUMBER PLUS
+
+%%
+
+expr:
+    expr PLUS expr
+  | LPAREN expr RPAREN
+  | NUMBER
+  ;
+
+%%
+"#;
+        let err = Grammar::parse(input).unwrap_err().to_string();
+        assert!(err.contains("LPAREN"), "error should name the symbol: {}", err);
+    }
+
+    #[test]
+    fn test_undeclared_token_error_reports_correct_line() {
+        // Regression test: the reported line used to always be self.line -
+        // wherever the parser's cursor happened to land when the post-parse
+        // validation ran (effectively end of file), not where the offending
+        // symbol actually appears. A valid rule comes first here so a
+        // stuck-at-a-fixed-value line number wouldn't accidentally match by
+        // coincidence.
+        let input = "\
+%token NUMBER PLUS
+
+%%
+
+expr:
+    NUMBER
+  ;
+
+stmt:
+    UNDECLARED_SYM
+  ;
+
+%%
+";
+        let expected_line = input
+            .lines()
+            .position(|l| l.contains("UNDECLARED_SYM"))
+            .expect("test input must contain UNDECLARED_SYM")
+            + 1; // lines() is 0-indexed, source lines are 1-indexed
+
+        match Grammar::parse(input) {
+            Err(Error::GrammarError { line, message }) => {
+                assert!(message.contains("UNDECLARED_SYM"));
+                assert_eq!(
+                    line, expected_line,
+                    "expected the error to point at line {} (where UNDECLARED_SYM appears), got {}",
+                    expected_line, line
+                );
+            }
+            other => panic!("expected Err(Error::GrammarError {{ .. }}), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_recovery_token_is_exempt_from_undeclared_check() {
+        // Bison's reserved `error` pseudo-terminal is never declared via
+        // %token and never a rule's LHS - it must not trip the undeclared-
+        // symbol check that catches genuine typos like LPAREN above.
+        let input = r#"
+%token NUMBER NEWLINE
+
+%%
+
+line:
+    NUMBER NEWLINE
+  | error NEWLINE
+  ;
+
+%%
+"#;
+        assert!(Grammar::parse(input).is_ok());
+    }
+
+    #[test]
+    fn test_properly_declared_token_in_rule_is_fine() {
+        let input = r#"
+%token NUMBER LPAREN RPAREN
+
+%%
+
+expr:
+    LPAREN expr RPAREN
+  | NUMBER
+  ;
+
+%%
+"#;
+        assert!(Grammar::parse(input).is_ok());
     }
 }
