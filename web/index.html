@@ -216,12 +216,36 @@
             let source = code;
             if (extraCode && extraCode.trim().length > 0) {
                 // No multi-file support here (unlike the old backend/Wandbox),
-                // so concatenate lexer + parser into one script and drop the
-                // now-pointless "from lexer import ..." line - both files'
-                // top-level definitions land in the same module namespace
-                // either way, so nothing after that needs to change.
+                // so concatenate lexer + parser into one script. Two fixups,
+                // same reasoning gui.rs's strip_default_main() already applies
+                // to the *other* combined-execution path in this codebase:
+                //  - drop the now-pointless "from lexer import ..." line -
+                //    both files' top-level definitions land in the same
+                //    module namespace either way.
+                //  - truncate the lexer's OWN "if __name__ == '__main__':"
+                //    test driver. It's unconditional, so left in place it
+                //    runs first when the combined script executes top to
+                //    bottom - the lexer's own token-dump driver hijacks the
+                //    run before the parser's driver (which we actually want
+                //    to see the output of) ever gets to run.
+                const mainGuardIdx = extraCode.indexOf("if __name__ == '__main__':");
+                const lexerDefsOnly = mainGuardIdx === -1 ? extraCode : extraCode.slice(0, mainGuardIdx);
                 const withoutImport = code.replace(/^\s*(from lexer import .*|import lexer)\s*$/m, "");
-                source = extraCode + "\n" + withoutImport;
+                // The generated parser's own test driver (parse_expression())
+                // doesn't just use the stripped top-level import - it falls
+                // back to importlib.import_module('lexer') and then to
+                // reading a sibling lexer.py file from disk, neither of which
+                // exist in this single in-memory-file sandbox. Since Lexer/
+                // TokenType are already plain top-level names here after
+                // concatenation, pre-registering a fake 'lexer' module in
+                // sys.modules satisfies that lookup with zero knowledge of
+                // parse_expression()'s internals - and is a no-op if nothing
+                // ever tries to import 'lexer' (e.g. code with no test driver).
+                const lexerModuleShim =
+                    "\nimport sys as __sys, types as __types\n" +
+                    "__sys.modules['lexer'] = __types.SimpleNamespace(" +
+                    "Lexer=globals().get('Lexer'), TokenType=globals().get('TokenType'))\n";
+                source = lexerDefsOnly + lexerModuleShim + withoutImport;
             }
             return runOnGodbolt("python312", source, testInput);
         }

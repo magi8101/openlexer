@@ -182,8 +182,24 @@ pub fn extract_printf_call(action: &str) -> Option<(PressedAction, usize, usize)
             }
         }
 
+        // Every character that reaches here is part of the argument list
+        // (including nested '(' / ')', e.g. printf("%d", foo(x, y))) - only
+        // the special-cased escape/quote branches above push-and-continue
+        // before this point, and only the closing ')' of printf(...) itself
+        // breaks before it.
+        args.push(c);
         pos += 1;
     }
+
+    // `pos` stops AT printf(...)'s closing ')' (not past it) unless the
+    // input was malformed and we ran off the end looking for it - consume
+    // that ')' too so the returned range covers the whole call and callers
+    // splicing text around [start, end) don't leave a stray ')' behind.
+    let end_pos = if pos < chars.len() && chars[pos] == ')' {
+        pos + 1
+    } else {
+        pos
+    };
 
     Some((
         PressedAction {
@@ -191,7 +207,7 @@ pub fn extract_printf_call(action: &str) -> Option<(PressedAction, usize, usize)
             args: args.trim().to_string(),
         },
         start,
-        pos,
+        end_pos,
     ))
 }
 
@@ -226,5 +242,44 @@ pub fn convert_printf_to_java(fmt: &str, args: &str) -> String {
         format!("System.out.printf(\"{}\");", java_fmt)
     } else {
         format!("System.out.printf(\"{}\", {});", java_fmt, args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_printf_call_single_arg() {
+        // Regression test: the arg-collection loop used to track paren depth
+        // correctly but never actually copy ordinary characters into `args`
+        // (only the escape/quote special cases did), so args always came
+        // back empty for anything but a bare string literal. And `end` used
+        // to point AT printf(...)'s closing ')' rather than past it, so
+        // splicing text around [start, end) left the original ')' behind.
+        let action = r#"result = $1; printf("= %g\n", result);"#;
+        let (parsed, start, end) = extract_printf_call(action).expect("should find printf(");
+        assert_eq!(parsed.fmt_str, "= %g\\n");
+        assert_eq!(parsed.args, "result");
+        assert_eq!(&action[start..end], r#"printf("= %g\n", result)"#);
+        assert_eq!(&action[end..], ";");
+    }
+
+    #[test]
+    fn test_extract_printf_call_nested_call_arg() {
+        // A nested function call in the argument list has its own parens;
+        // those must be copied into `args` too, not just tracked for depth.
+        let action = r#"printf("%d", foo(x, y));"#;
+        let (parsed, _start, end) = extract_printf_call(action).expect("should find printf(");
+        assert_eq!(parsed.args, "foo(x, y)");
+        assert_eq!(&action[end..], ";");
+    }
+
+    #[test]
+    fn test_convert_printf_to_python_single_arg() {
+        let action = r#"printf("= %g\n", result);"#;
+        let (parsed, _, _) = extract_printf_call(action).unwrap();
+        let py = convert_printf_to_python(&parsed.fmt_str, &parsed.args);
+        assert_eq!(py, "print(\"= {}\\n\".format(result))");
     }
 }
