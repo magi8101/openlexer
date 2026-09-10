@@ -11,6 +11,7 @@
 //! - Grouping: `(a|b)`
 //! - Interval/repetition: `a{2,4}`, `a{3}`, `a{2,}`
 //! - Character classes: `[a-z]`, `[^0-9]`, `[abc]`
+//! - POSIX classes (inside a character class): `[[:alpha:]_]`, `[[:digit:]]`
 //! - Dot (any char): `.`
 //! - Escape sequences: `\d`, `\w`, `\s`, `\D`, `\W`, `\S`, `\n`, `\t`, etc.
 //! - Unicode escapes: `\u{XXXX}`, `\x{XXXX}`
@@ -645,6 +646,13 @@ impl<'a> RegexParser<'a> {
                 }));
             }
 
+            if c == '[' {
+                if let Some(posix_ranges) = self.try_parse_posix_class()? {
+                    ranges.extend(posix_ranges);
+                    continue;
+                }
+            }
+
             let first = self.parse_char_class_char()?;
 
             // Check for range
@@ -683,6 +691,46 @@ impl<'a> RegexParser<'a> {
         })
     }
 
+    /// Attempts to parse a POSIX class like `[:alpha:]` at the current
+    /// position (used inside a `[...]` character class, e.g. `[[:alpha:]_]`).
+    /// Returns `Ok(None)` and restores the position if what follows isn't
+    /// `[:name:]` syntax at all, so the caller can fall back to treating `[`
+    /// as a literal character. `[:name:]` with an unrecognized name is a
+    /// hard error, matching Flex.
+    fn try_parse_posix_class(&mut self) -> Result<Option<Vec<CharRange>>> {
+        let saved_chars = self.chars.clone();
+        let saved_index = self.current_index;
+
+        self.advance(); // consume '['
+        if !self.consume(':') {
+            self.chars = saved_chars;
+            self.current_index = saved_index;
+            return Ok(None);
+        }
+
+        let mut name = String::new();
+        while let Some(c) = self.peek() {
+            if !c.is_ascii_alphabetic() {
+                break;
+            }
+            name.push(c);
+            self.advance();
+        }
+
+        if name.is_empty() || !self.consume(':') || !self.consume(']') {
+            self.chars = saved_chars;
+            self.current_index = saved_index;
+            return Ok(None);
+        }
+
+        posix_class_ranges(&name)
+            .map(Some)
+            .ok_or_else(|| Error::RegexError {
+                position: self.position(),
+                message: format!("Unknown POSIX character class '[:{}:]'", name),
+            })
+    }
+
     /// Parses a single character inside a character class (handles escapes).
     fn parse_char_class_char(&mut self) -> Result<char> {
         match self.peek() {
@@ -717,6 +765,34 @@ impl<'a> RegexParser<'a> {
 fn is_special(c: char) -> bool {
     matches!(c, '*' | '+' | '?' | '|' | ')')
     // '(' and '[' and '.' handled explicitly
+}
+
+/// Ranges for a standard POSIX character class name (without the `[:` `:]`),
+/// e.g. `"alpha"` -> `[a-zA-Z]`. Returns `None` for an unrecognized name.
+fn posix_class_ranges(name: &str) -> Option<Vec<CharRange>> {
+    use CharRange::{Range, Single};
+    Some(match name {
+        "alpha" => vec![Range('a', 'z'), Range('A', 'Z')],
+        "digit" => vec![Range('0', '9')],
+        "alnum" => vec![Range('a', 'z'), Range('A', 'Z'), Range('0', '9')],
+        "upper" => vec![Range('A', 'Z')],
+        "lower" => vec![Range('a', 'z')],
+        "xdigit" => vec![Range('0', '9'), Range('a', 'f'), Range('A', 'F')],
+        "space" => vec![
+            Single(' '),
+            Single('\t'),
+            Single('\n'),
+            Single('\r'),
+            Single('\x0C'),
+            Single('\x0B'),
+        ],
+        "blank" => vec![Single(' '), Single('\t')],
+        "punct" => "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".chars().map(Single).collect(),
+        "cntrl" => vec![Range('\x00', '\x1F'), Single('\x7F')],
+        "print" => vec![Range('\x20', '\x7E')],
+        "graph" => vec![Range('\x21', '\x7E')],
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -1082,5 +1158,64 @@ mod tests {
             Box::new(Regex::Literal('}')),
         );
         assert_eq!(ast.root, expected);
+    }
+
+    #[test]
+    fn test_posix_class_alpha() {
+        let ast = RegexAst::parse("[[:alpha:]]").unwrap();
+        if let Regex::CharClass(cc) = ast.root {
+            assert!(!cc.negated);
+            assert!(cc.matches('a'));
+            assert!(cc.matches('Z'));
+            assert!(!cc.matches('5'));
+            assert!(!cc.matches(' '));
+        } else {
+            panic!("Expected CharClass for [[:alpha:]]");
+        }
+    }
+
+    #[test]
+    fn test_posix_class_combined_with_literal() {
+        // [[:alpha:]_] - identifier-style class
+        let ast = RegexAst::parse("[[:alpha:]_]").unwrap();
+        if let Regex::CharClass(cc) = ast.root {
+            assert!(cc.matches('a'));
+            assert!(cc.matches('_'));
+            assert!(!cc.matches('5'));
+        } else {
+            panic!("Expected CharClass for [[:alpha:]_]");
+        }
+    }
+
+    #[test]
+    fn test_posix_class_negated() {
+        // [^[:digit:]]
+        let ast = RegexAst::parse("[^[:digit:]]").unwrap();
+        if let Regex::CharClass(cc) = ast.root {
+            assert!(cc.negated);
+            assert!(!cc.matches('5'));
+            assert!(cc.matches('a'));
+        } else {
+            panic!("Expected CharClass for [^[:digit:]]");
+        }
+    }
+
+    #[test]
+    fn test_posix_class_unknown_name_errors() {
+        assert!(RegexAst::parse("[[:bogus:]]").is_err());
+    }
+
+    #[test]
+    fn test_bracket_without_colon_is_literal() {
+        // A '[' that isn't `[:name:]` syntax inside a class is just a literal
+        // '[' character (e.g. someone matching a literal bracket).
+        let ast = RegexAst::parse("[[ab]").unwrap();
+        if let Regex::CharClass(cc) = ast.root {
+            assert!(cc.matches('['));
+            assert!(cc.matches('a'));
+            assert!(cc.matches('b'));
+        } else {
+            panic!("Expected CharClass for [[ab]");
+        }
     }
 }
