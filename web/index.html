@@ -153,183 +153,79 @@
             return '';
         }
 
-        // --- Global Runtime Promises ---
-        // (None needed for Piston)
+        // --- Execution: Wandbox, called directly from the browser (no proxy) ---
+        // Wandbox's public API sets Access-Control-Allow-Origin: *, so it can be
+        // called straight from client-side JS - no backend needed just to get
+        // around CORS. https://github.com/melpon/wandbox/blob/master/kennel2/API.rst
+        const WANDBOX_URL = "https://wandbox.org/api/compile.json";
 
-        // Configuration: Automatically switch between Local and Production backend.
-        const IS_LOCAL = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-        const BACKEND_URL = IS_LOCAL
-            ? "http://localhost:8000/execute"
-            : "https://YOUR-RENDER-APP-NAME.onrender.com/execute"; // <--- CHANGE THIS TO YOUR RENDER URL
+        async function runOnWandbox(compiler, files, stdin) {
+            try {
+                const body = { compiler, stdin: stdin || "" };
+                if (files.length > 1) {
+                    body.code = "";
+                    body.codes = files.map(f => ({ file: f.name, code: f.content }));
+                } else {
+                    body.code = files[0].content;
+                }
 
-        // --- Python (via Backend Proxy) ---
+                const response = await fetch(WANDBOX_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Wandbox API Error: ${response.status} ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                let output = "";
+
+                if (result.compiler_error) {
+                    output += "[Compiler Error]\n" + result.compiler_error + "\n";
+                }
+                if (result.status !== "0") {
+                    output += `[Runtime Error (Exit Code: ${result.status})]\n`;
+                }
+                if (result.program_error) {
+                    output += result.program_error + "\n";
+                }
+                output += result.program_message || "";
+                return output;
+            } catch (e) {
+                return `Execution Error: ${e.message}\n(Check internet connection)`;
+            }
+        }
+
+        // --- Python ---
         async function runPython(code, testInput, extraCode = "") {
-            try {
-                console.log("[Status] Sending Python code to Backend Proxy...");
-
-                const files = [
-                    {
-                        name: "main.py",
-                        content: code
-                    }
-                ];
-
-                if (extraCode && extraCode.trim().length > 0) {
-                    files.push({
-                        name: "lexer.py",
-                        content: extraCode
-                    });
-                }
-
-                const response = await fetch(BACKEND_URL, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        language: "python",
-                        version: "3.10.0",
-                        files,
-                        stdin: testInput || "",
-                        args: testInput ? [testInput] : [],
-                        compile_timeout: 10000,
-                        run_timeout: 3000,
-                        memory_limit: 128 * 1024 * 1024,
-                    })
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Piston API Error: ${response.status} ${response.statusText}`);
-                }
-
-                const result = await response.json();
-                let output = "";
-
-                if (result.run) {
-                    if (result.run.code !== 0) {
-                        output += `[Runtime Error (Exit Code: ${result.run.code})]\n`;
-                        output += result.run.stderr + "\n";
-                    }
-                    output += result.run.stdout;
-                }
-                return output;
-            } catch (e) {
-                return `Execution Error: ${e.message}\n(Check internet connection)`;
+            const files = [{ name: "main.py", content: code }];
+            if (extraCode && extraCode.trim().length > 0) {
+                files.push({ name: "lexer.py", content: extraCode });
             }
+            return runOnWandbox("cpython-3.11.10", files, testInput);
         }
 
-        // --- C (via Backend Proxy) ---
+        // --- C ---
         async function runC(code, testInput) {
-            try {
-                console.log("[Status] Sending C code to Backend Proxy...");
-
-                const response = await fetch(BACKEND_URL, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        language: "c",
-                        version: "10.2.0",
-                        files: [
-                            {
-                                name: "main.c",
-                                content: code
-                            }
-                        ],
-                        stdin: testInput || "",
-                        args: testInput ? [testInput] : [],
-                        compile_timeout: 10000,
-                        run_timeout: 3000,
-                        memory_limit: 128 * 1024 * 1024,
-                    })
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Piston API Error: ${response.status} ${response.statusText}`);
-                }
-
-                const result = await response.json();
-                let output = "";
-
-                if (result.compile && result.compile.code !== 0) {
-                    output += "[Compilation Error]\n";
-                    output += result.compile.stdout + "\n";
-                    output += result.compile.stderr + "\n";
-                    return output;
-                }
-
-                if (result.run) {
-                    if (result.run.code !== 0) {
-                        output += `[Runtime Error (Exit Code: ${result.run.code})]\n`;
-                        output += result.run.stderr + "\n";
-                    }
-                    output += result.run.stdout;
-                }
-                return output;
-            } catch (e) {
-                return `Execution Error: ${e.message}\n(Check internet connection)`;
-            }
+            return runOnWandbox("gcc-13.2.0-c", [{ name: "main.c", content: code }], testInput);
         }
 
-        // --- Java (via Backend Proxy) ---
+        // --- Java ---
         async function runJava(code, testInput) {
-            try {
-                console.log("[Status] Sending Java code to Backend Proxy...");
-
-                // Pick a sensible source filename from code content.
-                // This avoids class/file mismatch when running parser-only code.
-                let javaFileName = "Main.java";
-                const publicClassMatch = code.match(/public\s+class\s+([A-Za-z_][A-Za-z0-9_]*)/);
-                if (publicClassMatch && publicClassMatch[1]) {
-                    javaFileName = `${publicClassMatch[1]}.java`;
-                } else if (/\bclass\s+Parser\b/.test(code) && !/\bclass\s+Lexer\b/.test(code)) {
-                    javaFileName = "Parser.java";
-                } else if (/\bclass\s+Lexer\b/.test(code)) {
-                    javaFileName = "Lexer.java";
-                }
-
-                const response = await fetch(BACKEND_URL, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        language: "java",
-                        version: "15.0.2",
-                        files: [
-                            {
-                                name: javaFileName,
-                                content: code
-                            }
-                        ],
-                        stdin: testInput || "",
-                        args: testInput ? [testInput] : [],
-                        compile_timeout: 10000,
-                        run_timeout: 3000,
-                        memory_limit: 128 * 1024 * 1024,
-                    })
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Piston API Error: ${response.status} ${response.statusText}`);
-                }
-
-                const result = await response.json();
-                let output = "";
-
-                if (result.compile && result.compile.code !== 0) {
-                    output += "[Compilation Error]\n";
-                    output += result.compile.stdout + "\n";
-                    output += result.compile.stderr + "\n";
-                    return output;
-                }
-
-                if (result.run) {
-                    if (result.run.code !== 0) {
-                        output += `[Runtime Error (Exit Code: ${result.run.code})]\n`;
-                        output += result.run.stderr + "\n";
-                    }
-                    output += result.run.stdout;
-                }
-                return output;
-            } catch (e) {
-                return `Execution Error: ${e.message}\n(Check internet connection)`;
+            // Pick a sensible source filename from code content - Java requires
+            // the file to be named after its public class.
+            let javaFileName = "Main.java";
+            const publicClassMatch = code.match(/public\s+class\s+([A-Za-z_][A-Za-z0-9_]*)/);
+            if (publicClassMatch && publicClassMatch[1]) {
+                javaFileName = `${publicClassMatch[1]}.java`;
+            } else if (/\bclass\s+Parser\b/.test(code) && !/\bclass\s+Lexer\b/.test(code)) {
+                javaFileName = "Parser.java";
+            } else if (/\bclass\s+Lexer\b/.test(code)) {
+                javaFileName = "Lexer.java";
             }
+            return runOnWandbox("openjdk-jdk-21+35", [{ name: javaFileName, content: code }], testInput);
         }
     </script>
 </head>

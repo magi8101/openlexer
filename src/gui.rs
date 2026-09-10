@@ -2879,18 +2879,66 @@ fn main() {
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .expect("Element is not a canvas");
 
-        if let Some(loading) = document.get_element_by_id("loading") {
-            let _ = loading.set_attribute("style", "display: none !important;");
-        }
-
-        eframe::WebRunner::new()
+        let start_result = eframe::WebRunner::new()
             .start(
                 canvas,
                 web_options,
                 Box::new(|cc| Ok(Box::new(OpenLexerApp::new(cc)))),
             )
-            .await
-            .expect("failed to start eframe");
+            .await;
+
+        match start_result {
+            Ok(()) => {
+                if let Some(loading) = document.get_element_by_id("loading") {
+                    let _ = loading.set_attribute("style", "display: none !important;");
+                }
+            }
+            Err(e) => {
+                // A panic here would just surface as an opaque wasm
+                // "unreachable" trap in the console (e.g. when the browser
+                // has no WebGL, which both eframe backends need). Show a
+                // readable message in the still-visible loading screen
+                // instead, and keep the underlying error in the console for
+                // anyone who does want the detail.
+                web_sys::console::error_1(&e);
+                let detail = e
+                    .clone()
+                    .dyn_into::<js_sys::Error>()
+                    .map(|err| String::from(err.message()))
+                    .unwrap_or_else(|_| format!("{:?}", e));
+                if let Some(loading) = document.get_element_by_id("loading") {
+                    loading.set_inner_html(&format!(
+                        "<h1 style=\"color:#ff6b6b;\">Couldn't start OpenLexer</h1>\
+                         <p style=\"max-width:34rem;text-align:center;margin-top:0.5rem;\">\
+                         Your browser or environment doesn't support what this app needs to \
+                         render (WebGL/WebGPU). This is a browser/environment setting, not \
+                         something wrong with the page - try one of these:</p>\
+                         <div style=\"max-width:34rem;text-align:left;margin-top:1rem;\
+                         font-size:0.9rem;line-height:1.5;\">\
+                         <p><strong>Chrome / Edge</strong> - go to <code>chrome://settings</code> \
+                         (or <code>edge://settings</code>) &rarr; System &rarr; turn on \
+                         &ldquo;Use graphics acceleration when available&rdquo;, then relaunch \
+                         the browser. You can check current status at \
+                         <code>chrome://gpu</code>.</p>\
+                         <p style=\"margin-top:0.75rem;\"><strong>Firefox</strong> - go to \
+                         <code>about:preferences#general</code> &rarr; Performance &rarr; \
+                         uncheck &ldquo;Use recommended performance settings&rdquo; &rarr; \
+                         check &ldquo;Use hardware acceleration when available&rdquo;, then \
+                         restart.</p>\
+                         <p style=\"margin-top:0.75rem;\"><strong>Running headless/automated</strong> \
+                         (e.g. via a script or CI) - headless Chrome disables GPU by default; \
+                         launch it with <code>--enable-unsafe-swiftshader</code> to render via \
+                         software WebGL.</p>\
+                         <p style=\"margin-top:0.75rem;\"><strong>Just want to use OpenLexer?</strong> \
+                         The CLI and desktop GUI (<code>cargo run --features gui --bin \
+                         openlexer-gui</code>) don't use WebGL at all.</p>\
+                         </div>\
+                         <p style=\"margin-top:1rem;font-size:0.8rem;color:#888;\">{}</p>",
+                        detail
+                    ));
+                }
+            }
+        }
     });
 }
 
