@@ -304,7 +304,6 @@ struct OpenLexerApp {
     parser_input: String,
     parser_output: String,
     parser_options: ParserOptions,
-    auto_lexer_spec: String,  // Auto-generated lexer spec from parser tokens
 
     // Try tab - user test program
     try_code: String,
@@ -432,7 +431,6 @@ impl OpenLexerApp {
             parser_input: String::new(),
             parser_output: String::new(),
             parser_options: ParserOptions::default(),
-            auto_lexer_spec: String::new(),
             try_code: String::new(),
             try_include: TryInclude::LexerOnly,
             cached_nfa: None,
@@ -623,34 +621,11 @@ impl OpenLexerApp {
                             Ok(code) => {
                                 let line_count = code.lines().count();
                                 self.parser_output = code;
-                                self.auto_lexer_spec = grammar.generate_lexer_spec();
 
-                                // Also auto-generate lexer code from the spec
-                                match lexgen::parse_lexer_spec(&self.auto_lexer_spec) {
-                                    Ok(spec) => {
-                                        match lexgen::generate_code(&spec, self.language.as_str()) {
-                                            Ok(lexer_code) => {
-                                                self.lexer_output = lexer_code;
-                                                self.log(
-                                                    LogLevel::Info,
-                                                    "Also auto-generated lexer from token spec",
-                                                );
-                                            }
-                                            Err(e) => {
-                                                self.log(
-                                                    LogLevel::Warning,
-                                                    &format!("Could not auto-generate lexer: {}", e),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.log(
-                                            LogLevel::Warning,
-                                            &format!("Invalid auto-generated lexer spec: {}", e),
-                                        );
-                                    }
-                                }
+                                self.log(
+                                    LogLevel::Warning,
+                                    "Parser generation without lexer specification. You will need to provide a compatible lexer implementation.",
+                                );
 
                                 self.status = format!(
                                     "Generated {} {} parser ({} lines)",
@@ -752,39 +727,9 @@ impl OpenLexerApp {
         } else {
             // Standard append logic for Python/C
             if include_lexer {
-                // Use explicit lexer if available, otherwise try auto-generated spec
+                // Use explicit lexer if available
                 let lexer_to_use = if !self.lexer_output.is_empty() {
                     self.lexer_output.clone()
-                } else if !self.auto_lexer_spec.is_empty() {
-                    // Auto-generate lexer from parser's token spec
-                    self.log(
-                        LogLevel::Info,
-                        "No explicit lexer found. Generating from parser token specification...",
-                    );
-                    match lexgen::parse_lexer_spec(&self.auto_lexer_spec) {
-                        Ok(spec) => {
-                            match lexgen::generate_code(&spec, self.language.as_str()) {
-                                Ok(code) => {
-                                    self.log(LogLevel::Success, "Auto-generated lexer from parser tokens");
-                                    code
-                                }
-                                Err(e) => {
-                                    self.log(
-                                        LogLevel::Warning,
-                                        &format!("Could not auto-generate lexer: {}", e),
-                                    );
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            self.log(
-                                LogLevel::Warning,
-                                &format!("Invalid auto-generated lexer spec: {}", e),
-                            );
-                            return;
-                        }
-                    }
                 } else {
                     self.log(LogLevel::Warning, "No generated lexer. Go to Lexer tab and Generate first.");
                     return;
