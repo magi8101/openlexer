@@ -59,20 +59,41 @@ pub fn generate_lexer_from_spec(
     spec: &LexerSpec,
     lang: TargetLanguage,
 ) -> Result<String> {
+    let trailing_dfas = build_trailing_context_dfas(spec)?;
+
     // If spec has only INITIAL condition and no `^` (beginning-of-line) anchors,
     // use the simple path - the condition-aware path below carries extra
     // machinery (a StartCondition enum, condition-keyed tables) that only pays
     // for itself when start conditions or `^` anchors are actually in use.
+    // (Trailing context isn't yet wired into that condition-aware path, so a
+    // rule combining `/` with explicit %s/%x, or with a `^` anchor that itself
+    // routes the whole spec through this path, falls back to matching the
+    // full r1r2 text unsplit rather than erroring.)
     if spec.start_conditions.len() <= 1 && !spec.rules.iter().any(|r| r.anchored_start) {
         match lang {
-            TargetLanguage::C => generate_c_full(dfa, spec),
-            TargetLanguage::Java => generate_java_full(dfa, spec),
-            TargetLanguage::Python => generate_python_full(dfa, spec),
+            TargetLanguage::C => generate_c_full(dfa, spec, &trailing_dfas),
+            TargetLanguage::Java => generate_java_full(dfa, spec, &trailing_dfas),
+            TargetLanguage::Python => generate_python_full(dfa, spec, &trailing_dfas),
         }
     } else {
         // Use the new condition-aware generator
         generate_lexer_from_spec_with_conditions(spec, lang)
     }
+}
+
+/// Builds a small standalone DFA for `r1` alone, for every rule with trailing
+/// context (`r1/r2`). The generated lexer re-scans a rule's matched text
+/// against this DFA to find where r1 ends, so only r1's text becomes the
+/// token and r2 is left unconsumed for the next match.
+fn build_trailing_context_dfas(spec: &LexerSpec) -> Result<HashMap<usize, Dfa>> {
+    let mut dfas = HashMap::new();
+    for (idx, rule) in spec.rules.iter().enumerate() {
+        if let Some(r1) = &rule.trailing_context {
+            let nfa = Nfa::from_regex(&r1.root)?;
+            dfas.insert(idx, Dfa::from_nfa(&nfa)?);
+        }
+    }
+    Ok(dfas)
 }
 
 // =============================================================================
@@ -1237,7 +1258,11 @@ fn generate_java_with_conditions(
 // Full multi-token lexer generation (legacy - no start conditions)
 // =============================================================================
 
-fn generate_c_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
+fn generate_c_full(
+    dfa: &Dfa,
+    spec: &LexerSpec,
+    trailing_dfas: &HashMap<usize, Dfa>,
+) -> Result<String> {
     let mut code = String::new();
 
     code.push_str("#include <stdio.h>\n");
@@ -1369,6 +1394,88 @@ fn generate_c_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
     code.push_str("}\n\n");
 
     // Generate next_token function
+    // Trailing context (r1/r2): a small standalone DFA per rule that has it,
+    // used to re-scan a match and find where r1 ends. Rules without trailing
+    // context have no functions/dispatch entry here.
+    for (rule_idx, tdfa) in trailing_dfas {
+        code.push_str(&format!(
+            "static int tc_transition_{rule_idx}(int state, uint32_t cp) {{\n"
+        ));
+        code.push_str("    switch (state) {\n");
+        for state in &tdfa.states {
+            code.push_str(&format!("        case {}:\n", state.id));
+            if !state.range_transitions.is_empty() {
+                for &(start_cp, end_cp, target) in &state.range_transitions {
+                    if start_cp == end_cp {
+                        code.push_str(&format!(
+                            "            if (cp == 0x{:X}) return {};\n",
+                            start_cp, target
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "            if (cp >= 0x{:X} && cp <= 0x{:X}) return {};\n",
+                            start_cp, end_cp, target
+                        ));
+                    }
+                }
+            } else {
+                for (ch, target) in &state.transitions {
+                    code.push_str(&format!(
+                        "            if (cp == 0x{:X}) return {};\n",
+                        *ch as u32, target
+                    ));
+                }
+            }
+            code.push_str("            return -1;\n");
+        }
+        code.push_str("        default: return -1;\n");
+        code.push_str("    }\n}\n\n");
+
+        code.push_str(&format!(
+            "static int tc_accepting_{rule_idx}(int state) {{\n"
+        ));
+        code.push_str("    switch (state) {\n");
+        for state in &tdfa.states {
+            if state.is_accepting {
+                code.push_str(&format!("        case {}: return 1;\n", state.id));
+            }
+        }
+        code.push_str("        default: return 0;\n");
+        code.push_str("    }\n}\n\n");
+    }
+
+    if !trailing_dfas.is_empty() {
+        code.push_str("/* Longest prefix of `start`[0..len) that rule_index's r1 alone accepts. */\n");
+        code.push_str("static int trailing_context_split(int rule_index, const char* start, int len) {\n");
+        code.push_str("    int state = 0, best = 0, pos = 0;\n");
+        code.push_str("    const char* p = start;\n");
+        code.push_str("    const char* end = start + len;\n");
+        code.push_str("    switch (rule_index) {\n");
+        for rule_idx in trailing_dfas.keys() {
+            code.push_str(&format!("        case {}:\n", rule_idx));
+            code.push_str(&format!("            if (tc_accepting_{}(state)) best = 0;\n", rule_idx));
+            code.push_str("            while (p < end) {\n");
+            code.push_str("                uint32_t cp = utf8_decode(&p);\n");
+            code.push_str(&format!(
+                "                int next = tc_transition_{}(state, cp);\n",
+                rule_idx
+            ));
+            code.push_str("                if (next < 0) break;\n");
+            code.push_str("                state = next;\n");
+            code.push_str("                pos = (int)(p - start);\n");
+            code.push_str(&format!(
+                "                if (tc_accepting_{}(state)) best = pos;\n",
+                rule_idx
+            ));
+            code.push_str("            }\n");
+            code.push_str("            break;\n");
+        }
+        code.push_str("        default: break;\n");
+        code.push_str("    }\n");
+        code.push_str("    return best;\n");
+        code.push_str("}\n\n");
+    }
+
     code.push_str("Token lexer_next(Lexer* lexer) {\n");
     code.push_str("    Token token;\n");
     code.push_str("    token.type = TOKEN_EOF;\n");
@@ -1452,6 +1559,26 @@ fn generate_c_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
 
     // Handle match result
     code.push_str("        if (last_accepting_rule >= 0) {\n");
+    code.push_str("            int match_len = (int)(last_accepting_pos - start);\n");
+    if !trailing_dfas.is_empty() {
+        code.push_str("            {\n");
+        code.push_str("                int has_tc = 0;\n");
+        code.push_str("                switch (last_accepting_rule) {\n");
+        for rule_idx in trailing_dfas.keys() {
+            code.push_str(&format!("                    case {}: has_tc = 1; break;\n", rule_idx));
+        }
+        code.push_str("                    default: break;\n");
+        code.push_str("                }\n");
+        code.push_str("                if (has_tc) {\n");
+        code.push_str(
+            "                    int split_len = trailing_context_split(last_accepting_rule, start, match_len);\n",
+        );
+        code.push_str("                    /* ponytail: dangerous trailing context (r1 boundary not decidable) falls back to the full match */\n");
+        code.push_str("                    match_len = split_len > 0 ? split_len : match_len;\n");
+        code.push_str("                    last_accepting_pos = start + match_len;\n");
+        code.push_str("                }\n");
+        code.push_str("            }\n");
+    }
     code.push_str("            lexer->current = last_accepting_pos;\n");
     code.push_str("            TokenType tt = rule_to_token(last_accepting_rule);\n");
     code.push_str("            if (tt == TOKEN_EOF) {\n");
@@ -1483,7 +1610,11 @@ fn generate_c_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
     Ok(code)
 }
 
-fn generate_java_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
+fn generate_java_full(
+    dfa: &Dfa,
+    spec: &LexerSpec,
+    trailing_dfas: &HashMap<usize, Dfa>,
+) -> Result<String> {
     let mut code = String::new();
 
     code.push_str("import java.util.HashMap;\n");
@@ -1630,6 +1761,86 @@ fn generate_java_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
     code.push_str("        }\n");
     code.push_str("    }\n\n");
 
+    // Trailing context (r1/r2): a small standalone DFA per rule that has it,
+    // used to re-scan a match and find where r1 ends. Rules without trailing
+    // context have no methods/dispatch entry here.
+    for (rule_idx, tdfa) in trailing_dfas {
+        code.push_str(&format!(
+            "    private static int tcTransition{rule_idx}(int state, int codepoint) {{\n"
+        ));
+        code.push_str("        switch (state) {\n");
+        for state in &tdfa.states {
+            code.push_str(&format!("            case {}:\n", state.id));
+            if !state.range_transitions.is_empty() {
+                for &(start_cp, end_cp, target) in &state.range_transitions {
+                    if start_cp == end_cp {
+                        code.push_str(&format!(
+                            "                if (codepoint == 0x{:X}) return {};\n",
+                            start_cp, target
+                        ));
+                    } else {
+                        code.push_str(&format!("                if (codepoint >= 0x{:X} && codepoint <= 0x{:X}) return {};\n", start_cp, end_cp, target));
+                    }
+                }
+            } else {
+                for (ch, target) in &state.transitions {
+                    code.push_str(&format!(
+                        "                if (codepoint == 0x{:X}) return {};\n",
+                        *ch as u32, target
+                    ));
+                }
+            }
+            code.push_str("                return -1;\n");
+        }
+        code.push_str("            default: return -1;\n");
+        code.push_str("        }\n    }\n\n");
+
+        code.push_str(&format!(
+            "    private static boolean tcAccepting{rule_idx}(int state) {{\n"
+        ));
+        code.push_str("        switch (state) {\n");
+        for state in &tdfa.states {
+            if state.is_accepting {
+                code.push_str(&format!("            case {}: return true;\n", state.id));
+            }
+        }
+        code.push_str("            default: return false;\n");
+        code.push_str("        }\n    }\n\n");
+    }
+
+    if !trailing_dfas.is_empty() {
+        code.push_str(
+            "    // Longest prefix of `text` that ruleIndex's r1 alone accepts.\n",
+        );
+        code.push_str("    private static int trailingContextSplit(int ruleIndex, String text) {\n");
+        code.push_str("        int state = 0, best = 0;\n");
+        code.push_str("        switch (ruleIndex) {\n");
+        for rule_idx in trailing_dfas.keys() {
+            code.push_str(&format!("            case {}:\n", rule_idx));
+            code.push_str(&format!(
+                "                if (tcAccepting{}(state)) best = 0;\n",
+                rule_idx
+            ));
+            code.push_str("                for (int i = 0; i < text.length(); i++) {\n");
+            code.push_str(&format!(
+                "                    int next = tcTransition{}(state, text.charAt(i));\n",
+                rule_idx
+            ));
+            code.push_str("                    if (next < 0) break;\n");
+            code.push_str("                    state = next;\n");
+            code.push_str(&format!(
+                "                    if (tcAccepting{}(state)) best = i + 1;\n",
+                rule_idx
+            ));
+            code.push_str("                }\n");
+            code.push_str("                break;\n");
+        }
+        code.push_str("            default: break;\n");
+        code.push_str("        }\n");
+        code.push_str("        return best;\n");
+        code.push_str("    }\n\n");
+    }
+
     // nextToken method - using range-based transitions with line/column tracking
     code.push_str("    public Token nextToken() {\n");
     code.push_str("        while (pos < input.length()) {\n");
@@ -1661,6 +1872,36 @@ fn generate_java_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
     code.push_str("            }\n\n");
 
     code.push_str("            if (lastAcceptingRule >= 0) {\n");
+    if !trailing_dfas.is_empty() {
+        code.push_str("                switch (lastAcceptingRule) {\n");
+        for rule_idx in trailing_dfas.keys() {
+            code.push_str(&format!("                    case {}: {{\n", rule_idx));
+            code.push_str(
+                "                        String matched = input.substring(start, lastAcceptingPos);\n",
+            );
+            code.push_str(&format!(
+                "                        int splitLen = trailingContextSplit({}, matched);\n",
+                rule_idx
+            ));
+            code.push_str("                        // ponytail: dangerous trailing context (r1 boundary not decidable) falls back to the full match\n");
+            code.push_str("                        if (splitLen > 0) {\n");
+            code.push_str("                            String kept = matched.substring(0, splitLen);\n");
+            code.push_str("                            lastAcceptingPos = start + splitLen;\n");
+            code.push_str("                            long newlines = kept.chars().filter(c -> c == '\\n').count();\n");
+            code.push_str("                            if (newlines > 0) {\n");
+            code.push_str("                                lastAcceptingLine = (int) (startLine + newlines);\n");
+            code.push_str("                                lastAcceptingColumn = kept.length() - kept.lastIndexOf('\\n');\n");
+            code.push_str("                            } else {\n");
+            code.push_str("                                lastAcceptingLine = startLine;\n");
+            code.push_str("                                lastAcceptingColumn = startColumn + kept.length();\n");
+            code.push_str("                            }\n");
+            code.push_str("                        }\n");
+            code.push_str("                        break;\n");
+            code.push_str("                    }\n");
+        }
+        code.push_str("                    default: break;\n");
+        code.push_str("                }\n");
+    }
     code.push_str("                pos = lastAcceptingPos;\n");
     code.push_str("                line = lastAcceptingLine;\n");
     code.push_str("                column = lastAcceptingColumn;\n");
@@ -1686,7 +1927,11 @@ fn generate_java_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
     Ok(code)
 }
 
-fn generate_python_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
+fn generate_python_full(
+    dfa: &Dfa,
+    spec: &LexerSpec,
+    trailing_dfas: &HashMap<usize, Dfa>,
+) -> Result<String> {
     let mut code = String::new();
 
     code.push_str("\"\"\"Lexer generated by OpenLexer with Unicode support.\"\"\"\n\n");
@@ -1809,6 +2054,62 @@ fn generate_python_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
     }
     code.push_str("    return -1\n\n");
 
+    // Trailing context (r1/r2): a small standalone DFA per rule that has it,
+    // used to re-scan a match and find where r1 ends. Rules without trailing
+    // context have no entry here.
+    code.push_str("# Trailing context ('r1/r2'): rule_index -> (transitions, accepting_states)\n");
+    code.push_str("TRAILING_CONTEXT = {\n");
+    for (rule_idx, tdfa) in trailing_dfas {
+        code.push_str(&format!("    {}: (\n        {{", rule_idx));
+        for state in &tdfa.states {
+            if !state.range_transitions.is_empty() {
+                code.push_str(&format!("{}: [", state.id));
+                for &(start_cp, end_cp, target) in &state.range_transitions {
+                    code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", start_cp, end_cp, target));
+                }
+                code.push_str("], ");
+            } else if !state.transitions.is_empty() {
+                code.push_str(&format!("{}: [", state.id));
+                for (ch, target) in &state.transitions {
+                    let cp = *ch as u32;
+                    code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", cp, cp, target));
+                }
+                code.push_str("], ");
+            }
+        }
+        code.push_str("},\n        {");
+        for state in &tdfa.states {
+            if state.is_accepting {
+                code.push_str(&format!("{}, ", state.id));
+            }
+        }
+        code.push_str("},\n    ),\n");
+    }
+    code.push_str("}\n\n");
+
+    if !trailing_dfas.is_empty() {
+        code.push_str("def _trailing_context_split(rule_index: int, text: str) -> int:\n");
+        code.push_str("    \"\"\"Longest prefix of `text` that rule_index's r1 alone accepts.\"\"\"\n");
+        code.push_str("    trans, accept = TRAILING_CONTEXT[rule_index]\n");
+        code.push_str("    state = 0\n");
+        code.push_str("    best = 0\n");
+        code.push_str("    if state in accept:\n");
+        code.push_str("        best = 0\n");
+        code.push_str("    for i, ch in enumerate(text):\n");
+        code.push_str("        cp = ord(ch)\n");
+        code.push_str("        next_state = -1\n");
+        code.push_str("        for start_cp, end_cp, target in trans.get(state, []):\n");
+        code.push_str("            if start_cp <= cp <= end_cp:\n");
+        code.push_str("                next_state = target\n");
+        code.push_str("                break\n");
+        code.push_str("        if next_state == -1:\n");
+        code.push_str("            break\n");
+        code.push_str("        state = next_state\n");
+        code.push_str("        if state in accept:\n");
+        code.push_str("            best = i + 1\n");
+        code.push_str("    return best\n\n");
+    }
+
     // Lexer class
     code.push_str("class Lexer:\n");
     code.push_str("    def __init__(self, input_str: str):\n");
@@ -1848,6 +2149,22 @@ fn generate_python_full(dfa: &Dfa, spec: &LexerSpec) -> Result<String> {
     code.push_str("                    last_accepting_column = self.column\n\n");
 
     code.push_str("            if last_accepting_rule >= 0:\n");
+    code.push_str("                if last_accepting_rule in TRAILING_CONTEXT:\n");
+    code.push_str("                    matched = self.input[start:last_accepting_pos]\n");
+    code.push_str(
+        "                    split_len = _trailing_context_split(last_accepting_rule, matched)\n",
+    );
+    code.push_str("                    if split_len == 0:  # r1 boundary not found in a decidable way\n");
+    code.push_str("                        split_len = len(matched)  # ponytail: dangerous trailing context, see r1/r2 docs\n");
+    code.push_str("                    last_accepting_pos = start + split_len\n");
+    code.push_str("                    kept = self.input[start:last_accepting_pos]\n");
+    code.push_str("                    newlines = kept.count('\\n')\n");
+    code.push_str("                    if newlines:\n");
+    code.push_str("                        last_accepting_line = start_line + newlines\n");
+    code.push_str("                        last_accepting_column = len(kept) - kept.rfind('\\n')\n");
+    code.push_str("                    else:\n");
+    code.push_str("                        last_accepting_line = start_line\n");
+    code.push_str("                        last_accepting_column = start_column + len(kept)\n");
     code.push_str("                self.pos = last_accepting_pos\n");
     code.push_str("                self.line = last_accepting_line\n");
     code.push_str("                self.column = last_accepting_column\n");
