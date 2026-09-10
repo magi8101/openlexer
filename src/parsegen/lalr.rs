@@ -69,6 +69,8 @@ fn augment_grammar(grammar: &Grammar) -> Grammar {
         prologue: grammar.prologue.clone(),
         epilogue: grammar.epilogue.clone(),
         token_literals: grammar.token_literals.clone(),
+        code_top: grammar.code_top.clone(),
+        code_blocks: grammar.code_blocks.clone(),
     }
 }
 

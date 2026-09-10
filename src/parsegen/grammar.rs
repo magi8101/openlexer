@@ -65,6 +65,18 @@ pub struct Grammar {
     /// Maps token names to their original literal strings (for textbook notation).
     /// E.g. "LPAREN" → "(", "IF" → "if".
     pub token_literals: HashMap<String, String>,
+    /// Content from `%code top { ... }` blocks, in declaration order. Emitted
+    /// before everything else in the generated file, even before its
+    /// standard includes/imports - for content that must come first (e.g. a
+    /// header guard, or a package/module statement).
+    pub code_top: Vec<String>,
+    /// Content from `%code requires { ... }`, `%code provides { ... }`, and
+    /// bare `%code { ... }` blocks, in declaration order. Bison places these
+    /// in different generated locations (a shared header vs. the
+    /// implementation file); this generator doesn't produce a separate
+    /// header, so they're all emitted together with the legacy `%{ ... %}`
+    /// prologue, near the top of the file, before parser logic.
+    pub code_blocks: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +129,8 @@ impl Grammar {
             prologue: None,
             epilogue: None,
             token_literals: HashMap::new(),
+            code_top: Vec::new(),
+            code_blocks: Vec::new(),
         }
     }
 
@@ -299,6 +313,8 @@ impl<'a> GrammarParser<'a> {
                 self.parse_destructor_decl()?;
             } else if self.consume("%define") {
                 self.parse_define_decl()?;
+            } else if self.consume("%code") {
+                self.parse_code_decl()?;
             } else {
                 // Ignore unknown decls or comments
                 self.advance();
@@ -518,6 +534,30 @@ impl<'a> GrammarParser<'a> {
 
         if !targets.is_empty() {
             self.grammar.destructors.push(Destructor { code, targets });
+        }
+        Ok(())
+    }
+
+    /// Parses `%code [qualifier] { ... }`. `qualifier` is `top`, `requires`,
+    /// `provides`, `imports`, or omitted (bare `%code { ... }`). Bison emits
+    /// each into a different location in a separate header/impl split; this
+    /// generator has no separate header, so only `top` (which must precede
+    /// everything else, even standard includes) is tracked apart from the
+    /// rest - see Grammar::code_top / code_blocks.
+    fn parse_code_decl(&mut self) -> Result<()> {
+        let qualifier = self.parse_ident()?;
+        self.skip_whitespace_and_comments();
+        if self.peek_char() != '{' {
+            return Err(Error::GrammarError {
+                line: self.line,
+                message: "Expected '{' after %code".to_string(),
+            });
+        }
+        let code = self.parse_action_block()?;
+        if qualifier == "top" {
+            self.grammar.code_top.push(code);
+        } else {
+            self.grammar.code_blocks.push(code);
         }
         Ok(())
     }
@@ -1456,5 +1496,77 @@ fn token_name_for(token: &str) -> String {
         }
     } else {
         token.to_uppercase()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_code_top() {
+        let input = r#"
+%code top {
+    #define FOO 1
+}
+%token NUM
+%%
+expr: NUM ;
+%%
+"#;
+        let grammar = Grammar::parse(input).unwrap();
+        assert_eq!(grammar.code_top.len(), 1);
+        assert!(grammar.code_top[0].contains("#define FOO 1"));
+        assert!(grammar.code_blocks.is_empty());
+    }
+
+    #[test]
+    fn test_code_requires_and_provides_and_bare() {
+        let input = r#"
+%code requires {
+    typedef struct Foo Foo;
+}
+%code provides {
+    void helper(void);
+}
+%code {
+    int bare_block;
+}
+%token NUM
+%%
+expr: NUM ;
+%%
+"#;
+        let grammar = Grammar::parse(input).unwrap();
+        assert!(grammar.code_top.is_empty());
+        assert_eq!(grammar.code_blocks.len(), 3);
+        assert!(grammar.code_blocks[0].contains("typedef struct Foo Foo;"));
+        assert!(grammar.code_blocks[1].contains("void helper(void);"));
+        assert!(grammar.code_blocks[2].contains("int bare_block;"));
+    }
+
+    #[test]
+    fn test_no_code_blocks_by_default() {
+        let input = r#"
+%token NUM
+%%
+expr: NUM ;
+%%
+"#;
+        let grammar = Grammar::parse(input).unwrap();
+        assert!(grammar.code_top.is_empty());
+        assert!(grammar.code_blocks.is_empty());
+    }
+
+    #[test]
+    fn test_code_missing_brace_errors() {
+        let input = r#"
+%code requires typedef struct Foo Foo;
+%token NUM
+%%
+expr: NUM ;
+%%
+"#;
+        assert!(Grammar::parse(input).is_err());
     }
 }
