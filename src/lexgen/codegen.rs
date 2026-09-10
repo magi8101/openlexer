@@ -28,19 +28,27 @@ pub fn generate_lexer_from_spec_with_conditions(
     spec: &LexerSpec,
     lang: TargetLanguage,
 ) -> Result<String> {
-    // Build DFAs for each start condition
+    // Build DFAs for each start condition. `dfas` is used whenever we're at the
+    // beginning of a line (bol) and also serves as the fallback table otherwise.
+    // `non_bol_dfas` only gets an entry for a condition when it actually has a
+    // `^`-anchored rule - most lexers never use `^`, so they pay nothing extra.
     let mut dfas: HashMap<String, Dfa> = HashMap::new();
+    let mut non_bol_dfas: HashMap<String, Dfa> = HashMap::new();
 
     for condition in spec.start_conditions.keys() {
-        let nfa = Nfa::from_lexer_spec_for_condition(spec, condition)?;
-        let dfa = Dfa::from_nfa(&nfa)?;
-        dfas.insert(condition.clone(), dfa);
+        let bol_nfa = Nfa::from_lexer_spec_for_condition(spec, condition, true)?;
+        dfas.insert(condition.clone(), Dfa::from_nfa(&bol_nfa)?);
+
+        if Nfa::condition_has_bol_rules(spec, condition) {
+            let non_bol_nfa = Nfa::from_lexer_spec_for_condition(spec, condition, false)?;
+            non_bol_dfas.insert(condition.clone(), Dfa::from_nfa(&non_bol_nfa)?);
+        }
     }
 
     match lang {
-        TargetLanguage::C => generate_c_with_conditions(&dfas, spec),
-        TargetLanguage::Java => generate_java_with_conditions(&dfas, spec),
-        TargetLanguage::Python => generate_python_with_conditions(&dfas, spec),
+        TargetLanguage::C => generate_c_with_conditions(&dfas, &non_bol_dfas, spec),
+        TargetLanguage::Java => generate_java_with_conditions(&dfas, &non_bol_dfas, spec),
+        TargetLanguage::Python => generate_python_with_conditions(&dfas, &non_bol_dfas, spec),
     }
 }
 
@@ -51,8 +59,11 @@ pub fn generate_lexer_from_spec(
     spec: &LexerSpec,
     lang: TargetLanguage,
 ) -> Result<String> {
-    // If spec has only INITIAL condition, use the simple path
-    if spec.start_conditions.len() <= 1 {
+    // If spec has only INITIAL condition and no `^` (beginning-of-line) anchors,
+    // use the simple path - the condition-aware path below carries extra
+    // machinery (a StartCondition enum, condition-keyed tables) that only pays
+    // for itself when start conditions or `^` anchors are actually in use.
+    if spec.start_conditions.len() <= 1 && !spec.rules.iter().any(|r| r.anchored_start) {
         match lang {
             TargetLanguage::C => generate_c_full(dfa, spec),
             TargetLanguage::Java => generate_java_full(dfa, spec),
@@ -70,6 +81,7 @@ pub fn generate_lexer_from_spec(
 
 fn generate_python_with_conditions(
     dfas: &HashMap<String, Dfa>,
+    non_bol_dfas: &HashMap<String, Dfa>,
     spec: &LexerSpec,
 ) -> Result<String> {
     let mut code = String::new();
@@ -187,6 +199,51 @@ fn generate_python_with_conditions(
     }
     code.push_str("}\n\n");
 
+    // Not-beginning-of-line tables: only present for a condition that actually
+    // has a `^`-anchored rule (which can't match unless at bol). When a
+    // condition has no entry here, the tables above serve both cases.
+    code.push_str("# '^' (beginning-of-line) anchor support: tables to use when NOT at\n");
+    code.push_str("# the start of a line. A condition missing here has no '^' rules, so\n");
+    code.push_str("# RANGE_TRANSITIONS/ACCEPTING above are used regardless of bol state.\n");
+    code.push_str(
+        "NON_BOL_RANGE_TRANSITIONS: Dict[StartCondition, Dict[int, List[Tuple[int, int, int]]]] = {\n",
+    );
+    for (cond, dfa) in non_bol_dfas {
+        code.push_str(&format!("    StartCondition.{}: {{\n", cond));
+        for state in &dfa.states {
+            if !state.range_transitions.is_empty() {
+                code.push_str(&format!("        {}: [", state.id));
+                for &(start_cp, end_cp, target) in &state.range_transitions {
+                    code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", start_cp, end_cp, target));
+                }
+                code.push_str("],\n");
+            } else if !state.transitions.is_empty() {
+                code.push_str(&format!("        {}: [", state.id));
+                for (ch, target) in &state.transitions {
+                    let cp = *ch as u32;
+                    code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", cp, cp, target));
+                }
+                code.push_str("],\n");
+            }
+        }
+        code.push_str("    },\n");
+    }
+    code.push_str("}\n\n");
+
+    code.push_str("NON_BOL_ACCEPTING: Dict[StartCondition, Dict[int, int]] = {\n");
+    for (cond, dfa) in non_bol_dfas {
+        code.push_str(&format!("    StartCondition.{}: {{\n", cond));
+        for state in &dfa.states {
+            if state.is_accepting {
+                if let Some(rule_idx) = state.rule_index {
+                    code.push_str(&format!("        {}: {},\n", state.id, rule_idx));
+                }
+            }
+        }
+        code.push_str("    },\n");
+    }
+    code.push_str("}\n\n");
+
     // Lexer class with start condition support
     code.push_str("class Lexer:\n");
     code.push_str("    def __init__(self, input_str: str):\n");
@@ -195,6 +252,7 @@ fn generate_python_with_conditions(
     code.push_str("        self.line = 1\n");
     code.push_str("        self.column = 1\n");
     code.push_str("        self.condition = StartCondition.INITIAL\n");
+    code.push_str("        self.at_bol = True  # start of input counts as beginning-of-line\n");
     code.push_str("        self._condition_stack: list = []\n\n");
 
     code.push_str("    def begin(self, condition: StartCondition):\n");
@@ -211,9 +269,8 @@ fn generate_python_with_conditions(
     code.push_str("        if self._condition_stack:\n");
     code.push_str("            self.condition = self._condition_stack.pop()\n\n");
 
-    code.push_str("    def _get_next_state(self, state: int, codepoint: int) -> int:\n");
+    code.push_str("    def _get_next_state(self, state: int, codepoint: int, trans_table) -> int:\n");
     code.push_str("        \"\"\"Find next state using range-based transitions.\"\"\"\n");
-    code.push_str("        trans_table = RANGE_TRANSITIONS.get(self.condition, {})\n");
     code.push_str("        ranges = trans_table.get(state, [])\n");
     code.push_str("        for start_cp, end_cp, target in ranges:\n");
     code.push_str("            if start_cp <= codepoint <= end_cp:\n");
@@ -229,12 +286,19 @@ fn generate_python_with_conditions(
     code.push_str("            last_accepting_rule = -1\n");
     code.push_str("            last_accepting_pos = start\n\n");
 
-    code.push_str("            accept_table = ACCEPTING.get(self.condition, {})\n\n");
+    code.push_str("            # '^' anchor: use the not-at-bol tables only when this condition\n");
+    code.push_str("            # actually has one; otherwise the normal tables cover both cases.\n");
+    code.push_str("            if not self.at_bol and self.condition in NON_BOL_ACCEPTING:\n");
+    code.push_str("                trans_table = NON_BOL_RANGE_TRANSITIONS.get(self.condition, {})\n");
+    code.push_str("                accept_table = NON_BOL_ACCEPTING.get(self.condition, {})\n");
+    code.push_str("            else:\n");
+    code.push_str("                trans_table = RANGE_TRANSITIONS.get(self.condition, {})\n");
+    code.push_str("                accept_table = ACCEPTING.get(self.condition, {})\n\n");
 
     code.push_str("            while self.pos < len(self.input):\n");
     code.push_str("                c = self.input[self.pos]\n");
     code.push_str("                codepoint = ord(c)\n");
-    code.push_str("                next_state = self._get_next_state(state, codepoint)\n");
+    code.push_str("                next_state = self._get_next_state(state, codepoint, trans_table)\n");
     code.push_str("                if next_state == -1:\n");
     code.push_str("                    break\n");
     code.push_str("                state = next_state\n");
@@ -256,7 +320,8 @@ fn generate_python_with_conditions(
         "                action = RULE_ACTIONS.get(last_accepting_rule, (TokenType.ERROR, None))\n",
     );
     code.push_str("                token_type, new_condition = action\n");
-    code.push_str("                text = self.input[start:last_accepting_pos]\n\n");
+    code.push_str("                text = self.input[start:last_accepting_pos]\n");
+    code.push_str("                self.at_bol = text.endswith('\\n')\n\n");
     code.push_str("                # Handle state change\n");
     code.push_str("                if new_condition is not None:\n");
     code.push_str("                    self.condition = new_condition\n\n");
@@ -268,6 +333,7 @@ fn generate_python_with_conditions(
     code.push_str("            else:\n");
     code.push_str("                # No match - return error token for single char\n");
     code.push_str("                self.pos = start + 1\n");
+    code.push_str("                self.at_bol = self.input[start] == '\\n'\n");
     code.push_str("                if self.input[start] == '\\n':\n");
     code.push_str("                    self.line += 1\n");
     code.push_str("                    self.column = 1\n");
@@ -292,7 +358,11 @@ fn generate_python_with_conditions(
     Ok(code)
 }
 
-fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> Result<String> {
+fn generate_c_with_conditions(
+    dfas: &HashMap<String, Dfa>,
+    non_bol_dfas: &HashMap<String, Dfa>,
+    spec: &LexerSpec,
+) -> Result<String> {
     let mut code = String::new();
 
     code.push_str("/**\n");
@@ -381,6 +451,8 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     code.push_str("    StartCondition condition;\n");
     code.push_str("    StartCondition condition_stack[32];\n");
     code.push_str("    int condition_stack_size;\n");
+    code.push_str("    /* '^' anchor: true at start of input or right after a newline */\n");
+    code.push_str("    int at_bol;\n");
     code.push_str("    /* yymore support */\n");
     code.push_str("    int yymore_flag;\n");
     code.push_str("    const char* yymore_start;\n");
@@ -465,6 +537,7 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     code.push_str("    lexer->column = 1;\n");
     code.push_str("    lexer->condition = CONDITION_INITIAL;\n");
     code.push_str("    lexer->condition_stack_size = 0;\n");
+    code.push_str("    lexer->at_bol = 1;\n");
     code.push_str("    lexer->yymore_flag = 0;\n");
     code.push_str("    lexer->yymore_start = input;\n");
     code.push_str("    lexer->reject_active = 0;\n");
@@ -495,92 +568,112 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     code.push_str("    }\n");
     code.push_str("}\n\n");
 
-    // Generate transition function for each condition using range-based transitions
-    for (cond, dfa) in dfas {
-        code.push_str(&format!(
-            "static int transition_{cond}(int state, uint32_t cp) {{\n"
-        ));
-        code.push_str("    switch (state) {\n");
-        for state in &dfa.states {
-            code.push_str(&format!("        case {}:\n", state.id));
+    // Emits transition_<cond><suffix>/accepting_<cond><suffix> functions for each
+    // (condition, dfa) pair. Used once for the normal tables and once more (with
+    // suffix "_nobol") for conditions that have a `^`-anchored rule.
+    fn emit_condition_fns(code: &mut String, dfas: &HashMap<String, Dfa>, suffix: &str) {
+        for (cond, dfa) in dfas {
+            code.push_str(&format!(
+                "static int transition_{cond}{suffix}(int state, uint32_t cp) {{\n"
+            ));
+            code.push_str("    switch (state) {\n");
+            for state in &dfa.states {
+                code.push_str(&format!("        case {}:\n", state.id));
 
-            // Use range_transitions if available, fall back to char transitions
-            if !state.range_transitions.is_empty() {
-                for &(start_cp, end_cp, target) in &state.range_transitions {
-                    if start_cp == end_cp {
+                // Use range_transitions if available, fall back to char transitions
+                if !state.range_transitions.is_empty() {
+                    for &(start_cp, end_cp, target) in &state.range_transitions {
+                        if start_cp == end_cp {
+                            code.push_str(&format!(
+                                "            if (cp == 0x{:X}) return {};\n",
+                                start_cp, target
+                            ));
+                        } else {
+                            code.push_str(&format!(
+                                "            if (cp >= 0x{:X} && cp <= 0x{:X}) return {};\n",
+                                start_cp, end_cp, target
+                            ));
+                        }
+                    }
+                    code.push_str("            return -1;\n");
+                } else if !state.transitions.is_empty() {
+                    // Fallback to legacy char-based switch
+                    code.push_str("            switch (cp) {\n");
+                    for (ch, target) in &state.transitions {
+                        let ch_repr = escape_c_char(*ch);
                         code.push_str(&format!(
-                            "            if (cp == 0x{:X}) return {};\n",
-                            start_cp, target
+                            "                case {}: return {};\n",
+                            ch_repr, target
                         ));
-                    } else {
+                    }
+                    code.push_str("                default: return -1;\n");
+                    code.push_str("            }\n");
+                } else {
+                    code.push_str("            return -1;\n");
+                }
+            }
+            code.push_str("        default: return -1;\n");
+            code.push_str("    }\n");
+            code.push_str("}\n\n");
+        }
+
+        for (cond, dfa) in dfas {
+            code.push_str(&format!(
+                "static int accepting_{cond}{suffix}(int state) {{\n"
+            ));
+            code.push_str("    switch (state) {\n");
+            for state in &dfa.states {
+                if state.is_accepting {
+                    if let Some(rule_idx) = state.rule_index {
                         code.push_str(&format!(
-                            "            if (cp >= 0x{:X} && cp <= 0x{:X}) return {};\n",
-                            start_cp, end_cp, target
+                            "        case {}: return {};\n",
+                            state.id, rule_idx
                         ));
                     }
                 }
-                code.push_str("            return -1;\n");
-            } else if !state.transitions.is_empty() {
-                // Fallback to legacy char-based switch
-                code.push_str("            switch (cp) {\n");
-                for (ch, target) in &state.transitions {
-                    let ch_repr = escape_c_char(*ch);
-                    code.push_str(&format!(
-                        "                case {}: return {};\n",
-                        ch_repr, target
-                    ));
-                }
-                code.push_str("                default: return -1;\n");
-                code.push_str("            }\n");
-            } else {
-                code.push_str("            return -1;\n");
             }
+            code.push_str("        default: return -1;\n");
+            code.push_str("    }\n");
+            code.push_str("}\n\n");
         }
-        code.push_str("        default: return -1;\n");
-        code.push_str("    }\n");
-        code.push_str("}\n\n");
     }
 
-    // Generate accepting state function for each condition
-    for (cond, dfa) in dfas {
-        code.push_str(&format!("static int accepting_{cond}(int state) {{\n"));
-        code.push_str("    switch (state) {\n");
-        for state in &dfa.states {
-            if state.is_accepting {
-                if let Some(rule_idx) = state.rule_index {
-                    code.push_str(&format!(
-                        "        case {}: return {};\n",
-                        state.id, rule_idx
-                    ));
-                }
-            }
-        }
-        code.push_str("        default: return -1;\n");
-        code.push_str("    }\n");
-        code.push_str("}\n\n");
-    }
+    emit_condition_fns(&mut code, dfas, "");
+    emit_condition_fns(&mut code, non_bol_dfas, "_nobol");
 
-    // Generate dispatch transition function
-    code.push_str("static int transition(StartCondition cond, int state, uint32_t cp) {\n");
+    // Generate dispatch transition function. `at_bol` selects the not-at-bol
+    // table for a condition that has one (i.e. has a `^`-anchored rule);
+    // conditions without any `^` rule ignore at_bol and always use the same table.
+    code.push_str("static int transition(StartCondition cond, int state, uint32_t cp, int at_bol) {\n");
     code.push_str("    switch (cond) {\n");
     for cond in dfas.keys() {
-        code.push_str(&format!(
-            "        case CONDITION_{}: return transition_{}(state, cp);\n",
-            cond, cond
-        ));
+        if non_bol_dfas.contains_key(cond) {
+            code.push_str(&format!(
+                "        case CONDITION_{cond}: return at_bol ? transition_{cond}(state, cp) : transition_{cond}_nobol(state, cp);\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "        case CONDITION_{cond}: return transition_{cond}(state, cp);\n"
+            ));
+        }
     }
     code.push_str("        default: return -1;\n");
     code.push_str("    }\n");
     code.push_str("}\n\n");
 
     // Generate dispatch accepting function
-    code.push_str("static int accepting(StartCondition cond, int state) {\n");
+    code.push_str("static int accepting(StartCondition cond, int state, int at_bol) {\n");
     code.push_str("    switch (cond) {\n");
     for cond in dfas.keys() {
-        code.push_str(&format!(
-            "        case CONDITION_{}: return accepting_{}(state);\n",
-            cond, cond
-        ));
+        if non_bol_dfas.contains_key(cond) {
+            code.push_str(&format!(
+                "        case CONDITION_{cond}: return at_bol ? accepting_{cond}(state) : accepting_{cond}_nobol(state);\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "        case CONDITION_{cond}: return accepting_{cond}(state);\n"
+            ));
+        }
     }
     code.push_str("        default: return -1;\n");
     code.push_str("    }\n");
@@ -687,7 +780,7 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     code.push_str("            const char* before = lexer->current;\n");
     code.push_str("            uint32_t cp = utf8_decode(&lexer->current);\n");
     code.push_str("            if (cp == 0) break;\n");
-    code.push_str("            int next_state = transition(lexer->condition, state, cp);\n");
+    code.push_str("            int next_state = transition(lexer->condition, state, cp, lexer->at_bol);\n");
     code.push_str("            if (next_state < 0) { lexer->current = before; break; }\n");
     code.push_str("            state = next_state;\n");
     code.push_str("            if (cp == '\\n') {\n");
@@ -696,7 +789,7 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     code.push_str("            } else {\n");
     code.push_str("                lexer->column++;\n");
     code.push_str("            }\n");
-    code.push_str("            int rule = accepting(lexer->condition, state);\n");
+    code.push_str("            int rule = accepting(lexer->condition, state, lexer->at_bol);\n");
     code.push_str("            if (rule >= 0) {\n");
     code.push_str("                /* Store in reject stack for potential REJECT */\n");
     code.push_str("                if (lexer->reject_stack_size < 64) {\n");
@@ -727,7 +820,8 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     code.push_str("            /* Set global yytext and yyleng */\n");
     code.push_str("            yytext = (char*)start;\n");
     code.push_str("            yyleng = (int)(last_accepting_pos - start);\n");
-    code.push_str("            yylineno = start_line;\n\n");
+    code.push_str("            yylineno = start_line;\n");
+    code.push_str("            lexer->at_bol = (yyleng > 0) && (start[yyleng - 1] == '\\n');\n\n");
     code.push_str("            RuleAction action = get_rule_action(last_accepting_rule);\n");
     code.push_str("            if (action.new_condition >= 0) {\n");
     code.push_str("                lexer->condition = (StartCondition)action.new_condition;\n");
@@ -760,6 +854,7 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     code.push_str("            int char_len = utf8_char_len(start);\n");
     code.push_str("            if (char_len == 0) char_len = 1;\n");
     code.push_str("            lexer->current = start + char_len;\n");
+    code.push_str("            lexer->at_bol = (*start == '\\n');\n");
     code.push_str("            if (*start == '\\n') {\n");
     code.push_str("                lexer->line++;\n");
     code.push_str("                lexer->column = 1;\n");
@@ -794,7 +889,11 @@ fn generate_c_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> 
     Ok(code)
 }
 
-fn generate_java_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) -> Result<String> {
+fn generate_java_with_conditions(
+    dfas: &HashMap<String, Dfa>,
+    non_bol_dfas: &HashMap<String, Dfa>,
+    spec: &LexerSpec,
+) -> Result<String> {
     let mut code = String::new();
 
     code.push_str("/**\n");
@@ -865,7 +964,10 @@ fn generate_java_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) 
     code.push_str("    private int line = 1;\n");
     code.push_str("    private int column = 1;\n");
     code.push_str("    private StartCondition condition = StartCondition.INITIAL;\n");
-    code.push_str("    private final List<StartCondition> conditionStack = new ArrayList<>();\n\n");
+    code.push_str("    private final List<StartCondition> conditionStack = new ArrayList<>();\n");
+    code.push_str(
+        "    private boolean atBol = true;  // '^' anchor: start of input or after a newline\n\n",
+    );
 
     code.push_str("    public Lexer(String input) {\n");
     code.push_str("        this.input = input;\n");
@@ -888,78 +990,123 @@ fn generate_java_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) 
     code.push_str("        }\n");
     code.push_str("    }\n\n");
 
-    // Generate transition method
+    // Generate transition method. `atBol` selects the not-at-bol per-condition
+    // method for a condition that has one (has a `^`-anchored rule); a
+    // condition without any `^` rule ignores atBol and always uses the same method.
     code.push_str("    private int transition(int state, char c) {\n");
     code.push_str("        switch (condition) {\n");
     for cond in dfas.keys() {
-        code.push_str(&format!(
-            "            case {}: return transition_{}(state, c);\n",
-            cond, cond
-        ));
+        if non_bol_dfas.contains_key(cond) {
+            code.push_str(&format!(
+                "            case {cond}: return atBol ? transition_{cond}(state, c) : transition_{cond}_nobol(state, c);\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "            case {cond}: return transition_{cond}(state, c);\n"
+            ));
+        }
     }
     code.push_str("            default: return -1;\n");
     code.push_str("        }\n");
     code.push_str("    }\n\n");
-
-    // Generate per-condition transition methods
-    for (cond, dfa) in dfas {
-        code.push_str(&format!(
-            "    private int transition_{}(int state, char c) {{\n",
-            cond
-        ));
-        code.push_str("        switch (state) {\n");
-        for state in &dfa.states {
-            code.push_str(&format!("            case {}:\n", state.id));
-            code.push_str("                switch (c) {\n");
-            for (ch, target) in &state.transitions {
-                let ch_repr = escape_java_char(*ch);
-                code.push_str(&format!(
-                    "                    case {}: return {};\n",
-                    ch_repr, target
-                ));
-            }
-            code.push_str("                    default: return -1;\n");
-            code.push_str("                }\n");
-        }
-        code.push_str("            default: return -1;\n");
-        code.push_str("        }\n");
-        code.push_str("    }\n\n");
-    }
 
     // Generate accepting method
     code.push_str("    private int accepting(int state) {\n");
     code.push_str("        switch (condition) {\n");
     for cond in dfas.keys() {
-        code.push_str(&format!(
-            "            case {}: return accepting_{}(state);\n",
-            cond, cond
-        ));
+        if non_bol_dfas.contains_key(cond) {
+            code.push_str(&format!(
+                "            case {cond}: return atBol ? accepting_{cond}(state) : accepting_{cond}_nobol(state);\n"
+            ));
+        } else {
+            code.push_str(&format!(
+                "            case {cond}: return accepting_{cond}(state);\n"
+            ));
+        }
     }
     code.push_str("            default: return -1;\n");
     code.push_str("        }\n");
     code.push_str("    }\n\n");
 
-    // Generate per-condition accepting methods
-    for (cond, dfa) in dfas {
-        code.push_str(&format!(
-            "    private int accepting_{}(int state) {{\n",
-            cond
-        ));
-        code.push_str("        switch (state) {\n");
-        for state in &dfa.states {
-            if state.is_accepting {
-                if let Some(rule_idx) = state.rule_index {
-                    code.push_str(&format!(
-                        "            case {}: return {};\n",
-                        state.id, rule_idx
-                    ));
+    // Emits transition_<cond><suffix>/accepting_<cond><suffix> methods for each
+    // (condition, dfa) pair - once for the normal tables, once more (suffix
+    // "_nobol") for conditions that have a `^`-anchored rule.
+    fn emit_condition_methods(code: &mut String, dfas: &HashMap<String, Dfa>, suffix: &str) {
+        for (cond, dfa) in dfas {
+            code.push_str(&format!(
+                "    private int transition_{cond}{suffix}(int state, char c) {{\n"
+            ));
+            code.push_str("        switch (state) {\n");
+            for state in &dfa.states {
+                code.push_str(&format!("            case {}:\n", state.id));
+
+                // Use range_transitions if available (same DFA data C/Python read),
+                // falling back to the plain char list. Without this, states built
+                // from a char class like [a-zA-Z] - which only populates
+                // range_transitions - would emit no transitions at all here.
+                if !state.range_transitions.is_empty() {
+                    for &(start_cp, end_cp, target) in &state.range_transitions {
+                        let start_ch = char::from_u32(start_cp).unwrap_or('\0');
+                        if start_cp == end_cp {
+                            code.push_str(&format!(
+                                "                if (c == {}) return {};\n",
+                                escape_java_char(start_ch),
+                                target
+                            ));
+                        } else {
+                            let end_ch = char::from_u32(end_cp).unwrap_or('\0');
+                            code.push_str(&format!(
+                                "                if (c >= {} && c <= {}) return {};\n",
+                                escape_java_char(start_ch),
+                                escape_java_char(end_ch),
+                                target
+                            ));
+                        }
+                    }
+                    code.push_str("                return -1;\n");
+                } else if !state.transitions.is_empty() {
+                    code.push_str("                switch (c) {\n");
+                    for (ch, target) in &state.transitions {
+                        let ch_repr = escape_java_char(*ch);
+                        code.push_str(&format!(
+                            "                    case {}: return {};\n",
+                            ch_repr, target
+                        ));
+                    }
+                    code.push_str("                    default: return -1;\n");
+                    code.push_str("                }\n");
+                } else {
+                    code.push_str("                return -1;\n");
                 }
             }
+            code.push_str("            default: return -1;\n");
+            code.push_str("        }\n");
+            code.push_str("    }\n\n");
         }
-        code.push_str("            default: return -1;\n");
-        code.push_str("        }\n");
-        code.push_str("    }\n\n");
+
+        for (cond, dfa) in dfas {
+            code.push_str(&format!(
+                "    private int accepting_{cond}{suffix}(int state) {{\n"
+            ));
+            code.push_str("        switch (state) {\n");
+            for state in &dfa.states {
+                if state.is_accepting {
+                    if let Some(rule_idx) = state.rule_index {
+                        code.push_str(&format!(
+                            "            case {}: return {};\n",
+                            state.id, rule_idx
+                        ));
+                    }
+                }
+            }
+            code.push_str("            default: return -1;\n");
+            code.push_str("        }\n");
+            code.push_str("    }\n\n");
+        }
     }
+
+    emit_condition_methods(&mut code, dfas, "");
+    emit_condition_methods(&mut code, non_bol_dfas, "_nobol");
 
     // Get token type from rule index
     code.push_str("    private TokenType getTokenType(int ruleIndex) {\n");
@@ -967,7 +1114,7 @@ fn generate_java_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) 
     for (idx, rule) in spec.rules.iter().enumerate() {
         let token_str = match &rule.action {
             RuleAction::Token(name) | RuleAction::TokenAndBegin(name, _) => {
-                format!("TokenType.{}", name.to_uppercase())
+                format!("TokenType.TOKEN_{}", name.to_uppercase())
             }
             RuleAction::Skip | RuleAction::Begin(_) => "null".to_string(),
             RuleAction::Error => "TokenType.TOKEN_ERROR".to_string(),
@@ -978,7 +1125,7 @@ fn generate_java_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) 
             idx, token_str
         ));
     }
-    code.push_str("            default: return TokenType.ERROR;\n");
+    code.push_str("            default: return TokenType.TOKEN_ERROR;\n");
     code.push_str("        }\n");
     code.push_str("    }\n\n");
 
@@ -1044,14 +1191,16 @@ fn generate_java_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) 
     code.push_str("            if (lastAcceptingRule >= 0) {\n");
     code.push_str("                pos = lastAcceptingPos;\n");
     code.push_str("                handleStateChange(lastAcceptingRule);\n");
+    code.push_str("                String text = input.substring(start, lastAcceptingPos);\n");
+    code.push_str("                atBol = !text.isEmpty() && text.charAt(text.length() - 1) == '\\n';\n");
     code.push_str("                if (isSkipRule(lastAcceptingRule)) {\n");
     code.push_str("                    continue;\n");
     code.push_str("                }\n");
     code.push_str("                TokenType type = getTokenType(lastAcceptingRule);\n");
-    code.push_str("                String text = input.substring(start, lastAcceptingPos);\n");
     code.push_str("                return new Token(type, text, start, startLine, startColumn);\n");
     code.push_str("            } else {\n");
     code.push_str("                pos = start + 1;\n");
+    code.push_str("                atBol = input.charAt(start) == '\\n';\n");
     code.push_str("                if (input.charAt(start) == '\\n') {\n");
     code.push_str("                    line++;\n");
     code.push_str("                    column = 1;\n");
@@ -1070,7 +1219,7 @@ fn generate_java_with_conditions(dfas: &HashMap<String, Dfa>, spec: &LexerSpec) 
     code.push_str("        while (true) {\n");
     code.push_str("            Token token = nextToken();\n");
     code.push_str("            tokens.add(token);\n");
-    code.push_str("            if (token.type == TokenType.EOF) break;\n");
+    code.push_str("            if (token.type == TokenType.TOKEN_EOF) break;\n");
     code.push_str("        }\n");
     code.push_str("        return tokens;\n");
     code.push_str("    }\n");
