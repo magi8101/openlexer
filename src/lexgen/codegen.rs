@@ -81,19 +81,45 @@ pub fn generate_lexer_from_spec(
     }
 }
 
-/// Builds a small standalone DFA for `r1` alone, for every rule with trailing
-/// context (`r1/r2`). The generated lexer re-scans a rule's matched text
-/// against this DFA to find where r1 ends, so only r1's text becomes the
-/// token and r2 is left unconsumed for the next match.
-fn build_trailing_context_dfas(spec: &LexerSpec) -> Result<HashMap<usize, Dfa>> {
-    let mut dfas = HashMap::new();
+/// Small standalone DFAs for a rule's `r1` and `r2` (from `r1/r2` trailing
+/// context), keyed by rule index. The generated lexer uses both to find
+/// where r1 ends: r1 alone can accept more than one prefix of the matched
+/// text (e.g. `a*` on "aaaa" accepts at every position), so the split point
+/// is the longest r1-accepted prefix whose remaining suffix is an *exact*
+/// match for r2 - not just the longest r1 prefix on its own, which would
+/// give the wrong boundary for a pattern like `a*/a` (see build_trailing_context_dfas).
+struct TrailingContextDfas {
+    r1: HashMap<usize, Dfa>,
+    r2: HashMap<usize, Dfa>,
+}
+
+impl TrailingContextDfas {
+    fn is_empty(&self) -> bool {
+        self.r1.is_empty()
+    }
+}
+
+/// Builds `r1`/`r2` DFAs for every rule with trailing context (`r1/r2`). The
+/// generated lexer re-scans a rule's matched text against these to find
+/// where r1 ends, so only r1's text becomes the token and r2 is left
+/// unconsumed for the next match.
+fn build_trailing_context_dfas(spec: &LexerSpec) -> Result<TrailingContextDfas> {
+    let mut r1_dfas = HashMap::new();
+    let mut r2_dfas = HashMap::new();
     for (idx, rule) in spec.rules.iter().enumerate() {
         if let Some(r1) = &rule.trailing_context {
             let nfa = Nfa::from_regex(&r1.root)?;
-            dfas.insert(idx, Dfa::from_nfa(&nfa)?);
+            r1_dfas.insert(idx, Dfa::from_nfa(&nfa)?);
+        }
+        if let Some(r2) = &rule.trailing_context_r2 {
+            let nfa = Nfa::from_regex(&r2.root)?;
+            r2_dfas.insert(idx, Dfa::from_nfa(&nfa)?);
         }
     }
-    Ok(dfas)
+    Ok(TrailingContextDfas {
+        r1: r1_dfas,
+        r2: r2_dfas,
+    })
 }
 
 // =============================================================================
@@ -1261,7 +1287,7 @@ fn generate_java_with_conditions(
 fn generate_c_full(
     dfa: &Dfa,
     spec: &LexerSpec,
-    trailing_dfas: &HashMap<usize, Dfa>,
+    trailing_dfas: &TrailingContextDfas,
 ) -> Result<String> {
     let mut code = String::new();
 
@@ -1397,63 +1423,108 @@ fn generate_c_full(
     // Trailing context (r1/r2): a small standalone DFA per rule that has it,
     // used to re-scan a match and find where r1 ends. Rules without trailing
     // context have no functions/dispatch entry here.
-    for (rule_idx, tdfa) in trailing_dfas {
-        code.push_str(&format!(
-            "static int tc_transition_{rule_idx}(int state, uint32_t cp) {{\n"
-        ));
-        code.push_str("    switch (state) {\n");
-        for state in &tdfa.states {
-            code.push_str(&format!("        case {}:\n", state.id));
-            if !state.range_transitions.is_empty() {
-                for &(start_cp, end_cp, target) in &state.range_transitions {
-                    if start_cp == end_cp {
+    fn emit_tc_dfa_fns(code: &mut String, dfas: &HashMap<usize, Dfa>, prefix: &str) {
+        for (rule_idx, tdfa) in dfas {
+            code.push_str(&format!(
+                "static int {prefix}_transition_{rule_idx}(int state, uint32_t cp) {{\n"
+            ));
+            code.push_str("    switch (state) {\n");
+            for state in &tdfa.states {
+                code.push_str(&format!("        case {}:\n", state.id));
+                if !state.range_transitions.is_empty() {
+                    for &(start_cp, end_cp, target) in &state.range_transitions {
+                        if start_cp == end_cp {
+                            code.push_str(&format!(
+                                "            if (cp == 0x{:X}) return {};\n",
+                                start_cp, target
+                            ));
+                        } else {
+                            code.push_str(&format!(
+                                "            if (cp >= 0x{:X} && cp <= 0x{:X}) return {};\n",
+                                start_cp, end_cp, target
+                            ));
+                        }
+                    }
+                } else {
+                    for (ch, target) in &state.transitions {
                         code.push_str(&format!(
                             "            if (cp == 0x{:X}) return {};\n",
-                            start_cp, target
-                        ));
-                    } else {
-                        code.push_str(&format!(
-                            "            if (cp >= 0x{:X} && cp <= 0x{:X}) return {};\n",
-                            start_cp, end_cp, target
+                            *ch as u32, target
                         ));
                     }
                 }
-            } else {
-                for (ch, target) in &state.transitions {
-                    code.push_str(&format!(
-                        "            if (cp == 0x{:X}) return {};\n",
-                        *ch as u32, target
-                    ));
+                code.push_str("            return -1;\n");
+            }
+            code.push_str("        default: return -1;\n");
+            code.push_str("    }\n}\n\n");
+
+            code.push_str(&format!(
+                "static int {prefix}_accepting_{rule_idx}(int state) {{\n"
+            ));
+            code.push_str("    switch (state) {\n");
+            for state in &tdfa.states {
+                if state.is_accepting {
+                    code.push_str(&format!("        case {}: return 1;\n", state.id));
                 }
             }
-            code.push_str("            return -1;\n");
+            code.push_str("        default: return 0;\n");
+            code.push_str("    }\n}\n\n");
         }
-        code.push_str("        default: return -1;\n");
-        code.push_str("    }\n}\n\n");
-
-        code.push_str(&format!(
-            "static int tc_accepting_{rule_idx}(int state) {{\n"
-        ));
-        code.push_str("    switch (state) {\n");
-        for state in &tdfa.states {
-            if state.is_accepting {
-                code.push_str(&format!("        case {}: return 1;\n", state.id));
-            }
-        }
-        code.push_str("        default: return 0;\n");
-        code.push_str("    }\n}\n\n");
     }
 
+    emit_tc_dfa_fns(&mut code, &trailing_dfas.r1, "tc");
+    emit_tc_dfa_fns(&mut code, &trailing_dfas.r2, "tc2");
+
     if !trailing_dfas.is_empty() {
-        code.push_str("/* Longest prefix of `start`[0..len) that rule_index's r1 alone accepts. */\n");
+        code.push_str("/* True if rule_index's r2 exactly matches text[0..len) (consumes all of it and ends accepting). */\n");
+        code.push_str("static int tc_r2_matches(int rule_index, const char* text, int len) {\n");
+        code.push_str("    int state = 0;\n");
+        code.push_str("    const char* p = text;\n");
+        code.push_str("    const char* end = text + len;\n");
+        code.push_str("    switch (rule_index) {\n");
+        for rule_idx in trailing_dfas.r1.keys() {
+            code.push_str(&format!("        case {}:\n", rule_idx));
+            code.push_str("            while (p < end) {\n");
+            code.push_str("                uint32_t cp = utf8_decode(&p);\n");
+            code.push_str(&format!(
+                "                int next = tc2_transition_{}(state, cp);\n",
+                rule_idx
+            ));
+            code.push_str("                if (next < 0) return 0;\n");
+            code.push_str("                state = next;\n");
+            code.push_str("            }\n");
+            code.push_str(&format!(
+                "            return tc2_accepting_{}(state);\n",
+                rule_idx
+            ));
+        }
+        code.push_str("        default: return 0;\n");
+        code.push_str("    }\n");
+        code.push_str("}\n\n");
+
+        // ponytail: caps at 256 candidate r1 boundaries per match; a single
+        // trailing-context match with more accepting prefixes than that
+        // (e.g. a huge repetitive token) silently only considers the first
+        // 256 - raise MAX_TC_CANDIDATES if a real spec needs more.
+        code.push_str("#define MAX_TC_CANDIDATES 256\n\n");
+        code.push_str("/* Longest prefix of `start`[0..len) accepted by rule_index's r1 whose\n");
+        code.push_str(" * remaining suffix is an exact match for r2 (not just the longest r1\n");
+        code.push_str(" * accepts on its own, which picks the wrong boundary for e.g. r1=a-star r2=a).\n");
+        code.push_str(" * Falls back to the full match (returns len) if no candidate validates -\n");
+        code.push_str(" * Flex's own \"dangerous trailing context\" case. */\n");
         code.push_str("static int trailing_context_split(int rule_index, const char* start, int len) {\n");
-        code.push_str("    int state = 0, best = 0, pos = 0;\n");
+        code.push_str("    int candidates[MAX_TC_CANDIDATES];\n");
+        code.push_str("    int num_candidates = 0;\n");
+        code.push_str("    int state = 0, pos = 0;\n");
         code.push_str("    const char* p = start;\n");
         code.push_str("    const char* end = start + len;\n");
         code.push_str("    switch (rule_index) {\n");
-        for rule_idx in trailing_dfas.keys() {
+        for rule_idx in trailing_dfas.r1.keys() {
             code.push_str(&format!("        case {}:\n", rule_idx));
-            code.push_str(&format!("            if (tc_accepting_{}(state)) best = 0;\n", rule_idx));
+            code.push_str(&format!(
+                "            if (tc_accepting_{}(state) && num_candidates < MAX_TC_CANDIDATES) candidates[num_candidates++] = 0;\n",
+                rule_idx
+            ));
             code.push_str("            while (p < end) {\n");
             code.push_str("                uint32_t cp = utf8_decode(&p);\n");
             code.push_str(&format!(
@@ -1464,7 +1535,7 @@ fn generate_c_full(
             code.push_str("                state = next;\n");
             code.push_str("                pos = (int)(p - start);\n");
             code.push_str(&format!(
-                "                if (tc_accepting_{}(state)) best = pos;\n",
+                "                if (tc_accepting_{}(state) && num_candidates < MAX_TC_CANDIDATES) candidates[num_candidates++] = pos;\n",
                 rule_idx
             ));
             code.push_str("            }\n");
@@ -1472,7 +1543,14 @@ fn generate_c_full(
         }
         code.push_str("        default: break;\n");
         code.push_str("    }\n");
-        code.push_str("    return best;\n");
+        code.push_str("    /* candidates[i] == 0 is excluded even if r1/r2 both validate it: it\n");
+        code.push_str("     * would produce a zero-length token and never advance lexer->current. */\n");
+        code.push_str("    for (int i = num_candidates - 1; i >= 0; i--) {\n");
+        code.push_str("        if (candidates[i] > 0 && tc_r2_matches(rule_index, start + candidates[i], len - candidates[i])) {\n");
+        code.push_str("            return candidates[i];\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n");
+        code.push_str("    return len;\n");
         code.push_str("}\n\n");
     }
 
@@ -1564,17 +1642,15 @@ fn generate_c_full(
         code.push_str("            {\n");
         code.push_str("                int has_tc = 0;\n");
         code.push_str("                switch (last_accepting_rule) {\n");
-        for rule_idx in trailing_dfas.keys() {
+        for rule_idx in trailing_dfas.r1.keys() {
             code.push_str(&format!("                    case {}: has_tc = 1; break;\n", rule_idx));
         }
         code.push_str("                    default: break;\n");
         code.push_str("                }\n");
         code.push_str("                if (has_tc) {\n");
         code.push_str(
-            "                    int split_len = trailing_context_split(last_accepting_rule, start, match_len);\n",
+            "                    match_len = trailing_context_split(last_accepting_rule, start, match_len);\n",
         );
-        code.push_str("                    /* ponytail: dangerous trailing context (r1 boundary not decidable) falls back to the full match */\n");
-        code.push_str("                    match_len = split_len > 0 ? split_len : match_len;\n");
         code.push_str("                    last_accepting_pos = start + match_len;\n");
         code.push_str("                }\n");
         code.push_str("            }\n");
@@ -1613,7 +1689,7 @@ fn generate_c_full(
 fn generate_java_full(
     dfa: &Dfa,
     spec: &LexerSpec,
-    trailing_dfas: &HashMap<usize, Dfa>,
+    trailing_dfas: &TrailingContextDfas,
 ) -> Result<String> {
     let mut code = String::new();
 
@@ -1764,9 +1840,10 @@ fn generate_java_full(
     // Trailing context (r1/r2): a small standalone DFA per rule that has it,
     // used to re-scan a match and find where r1 ends. Rules without trailing
     // context have no methods/dispatch entry here.
-    for (rule_idx, tdfa) in trailing_dfas {
+    fn emit_tc_dfa_methods(code: &mut String, dfas: &HashMap<usize, Dfa>, prefix: &str) {
+      for (rule_idx, tdfa) in dfas {
         code.push_str(&format!(
-            "    private static int tcTransition{rule_idx}(int state, int codepoint) {{\n"
+            "    private static int {prefix}Transition{rule_idx}(int state, int codepoint) {{\n"
         ));
         code.push_str("        switch (state) {\n");
         for state in &tdfa.states {
@@ -1796,7 +1873,7 @@ fn generate_java_full(
         code.push_str("        }\n    }\n\n");
 
         code.push_str(&format!(
-            "    private static boolean tcAccepting{rule_idx}(int state) {{\n"
+            "    private static boolean {prefix}Accepting{rule_idx}(int state) {{\n"
         ));
         code.push_str("        switch (state) {\n");
         for state in &tdfa.states {
@@ -1806,38 +1883,90 @@ fn generate_java_full(
         }
         code.push_str("            default: return false;\n");
         code.push_str("        }\n    }\n\n");
+      }
     }
 
+    emit_tc_dfa_methods(&mut code, &trailing_dfas.r1, "tc");
+    emit_tc_dfa_methods(&mut code, &trailing_dfas.r2, "tc2");
+
     if !trailing_dfas.is_empty() {
-        code.push_str(
-            "    // Longest prefix of `text` that ruleIndex's r1 alone accepts.\n",
-        );
-        code.push_str("    private static int trailingContextSplit(int ruleIndex, String text) {\n");
-        code.push_str("        int state = 0, best = 0;\n");
+        code.push_str("    // True if ruleIndex's r2 exactly matches text (consumes all of it and ends accepting).\n");
+        code.push_str("    private static boolean tcR2Matches(int ruleIndex, String text) {\n");
+        code.push_str("        int state = 0;\n");
+        code.push_str("        int i = 0;\n");
         code.push_str("        switch (ruleIndex) {\n");
-        for rule_idx in trailing_dfas.keys() {
+        for rule_idx in trailing_dfas.r1.keys() {
             code.push_str(&format!("            case {}:\n", rule_idx));
+            code.push_str("                while (i < text.length()) {\n");
+            code.push_str("                    int cp = text.codePointAt(i);\n");
             code.push_str(&format!(
-                "                if (tcAccepting{}(state)) best = 0;\n",
+                "                    int next = tc2Transition{}(state, cp);\n",
                 rule_idx
             ));
-            code.push_str("                for (int i = 0; i < text.length(); i++) {\n");
+            code.push_str("                    if (next < 0) return false;\n");
+            code.push_str("                    state = next;\n");
+            code.push_str("                    i += Character.charCount(cp);\n");
+            code.push_str("                }\n");
             code.push_str(&format!(
-                "                    int next = tcTransition{}(state, text.charAt(i));\n",
+                "                return tc2Accepting{}(state);\n",
+                rule_idx
+            ));
+        }
+        code.push_str("            default: return false;\n");
+        code.push_str("        }\n");
+        code.push_str("    }\n\n");
+
+        code.push_str(
+            "    // Longest prefix of `text` accepted by ruleIndex's r1 whose remaining\n",
+        );
+        code.push_str(
+            "    // suffix is an exact match for r2 (not just the longest r1 accepts on\n",
+        );
+        code.push_str(
+            "    // its own, which picks the wrong boundary for e.g. a*/a). Falls back to\n",
+        );
+        code.push_str(
+            "    // the full match (text.length()) if no candidate validates.\n",
+        );
+        code.push_str("    private static int trailingContextSplit(int ruleIndex, String text) {\n");
+        code.push_str("        java.util.List<Integer> candidates = new java.util.ArrayList<>();\n");
+        code.push_str("        int state = 0;\n");
+        code.push_str("        switch (ruleIndex) {\n");
+        for rule_idx in trailing_dfas.r1.keys() {
+            code.push_str(&format!("            case {}: {{\n", rule_idx));
+            code.push_str(&format!(
+                "                if (tcAccepting{}(state)) candidates.add(0);\n",
+                rule_idx
+            ));
+            code.push_str("                int i = 0;\n");
+            code.push_str("                while (i < text.length()) {\n");
+            code.push_str("                    int cp = text.codePointAt(i);\n");
+            code.push_str(&format!(
+                "                    int next = tcTransition{}(state, cp);\n",
                 rule_idx
             ));
             code.push_str("                    if (next < 0) break;\n");
             code.push_str("                    state = next;\n");
+            code.push_str("                    i += Character.charCount(cp);\n");
             code.push_str(&format!(
-                "                    if (tcAccepting{}(state)) best = i + 1;\n",
+                "                    if (tcAccepting{}(state)) candidates.add(i);\n",
                 rule_idx
             ));
             code.push_str("                }\n");
             code.push_str("                break;\n");
+            code.push_str("            }\n");
         }
         code.push_str("            default: break;\n");
         code.push_str("        }\n");
-        code.push_str("        return best;\n");
+        code.push_str("        // split == 0 is excluded even if r1/r2 both validate it: it would\n");
+        code.push_str("        // produce a zero-length token and never advance pos.\n");
+        code.push_str("        for (int i = candidates.size() - 1; i >= 0; i--) {\n");
+        code.push_str("            int split = candidates.get(i);\n");
+        code.push_str("            if (split > 0 && tcR2Matches(ruleIndex, text.substring(split))) {\n");
+        code.push_str("                return split;\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n");
+        code.push_str("        return text.length();\n");
         code.push_str("    }\n\n");
     }
 
@@ -1874,7 +2003,7 @@ fn generate_java_full(
     code.push_str("            if (lastAcceptingRule >= 0) {\n");
     if !trailing_dfas.is_empty() {
         code.push_str("                switch (lastAcceptingRule) {\n");
-        for rule_idx in trailing_dfas.keys() {
+        for rule_idx in trailing_dfas.r1.keys() {
             code.push_str(&format!("                    case {}: {{\n", rule_idx));
             code.push_str(
                 "                        String matched = input.substring(start, lastAcceptingPos);\n",
@@ -1883,17 +2012,17 @@ fn generate_java_full(
                 "                        int splitLen = trailingContextSplit({}, matched);\n",
                 rule_idx
             ));
-            code.push_str("                        // ponytail: dangerous trailing context (r1 boundary not decidable) falls back to the full match\n");
             code.push_str("                        if (splitLen > 0) {\n");
             code.push_str("                            String kept = matched.substring(0, splitLen);\n");
             code.push_str("                            lastAcceptingPos = start + splitLen;\n");
             code.push_str("                            long newlines = kept.chars().filter(c -> c == '\\n').count();\n");
             code.push_str("                            if (newlines > 0) {\n");
             code.push_str("                                lastAcceptingLine = (int) (startLine + newlines);\n");
-            code.push_str("                                lastAcceptingColumn = kept.length() - kept.lastIndexOf('\\n');\n");
+            code.push_str("                                int afterNewline = kept.lastIndexOf('\\n');\n");
+            code.push_str("                                lastAcceptingColumn = kept.codePointCount(afterNewline, kept.length());\n");
             code.push_str("                            } else {\n");
             code.push_str("                                lastAcceptingLine = startLine;\n");
-            code.push_str("                                lastAcceptingColumn = startColumn + kept.length();\n");
+            code.push_str("                                lastAcceptingColumn = startColumn + kept.codePointCount(0, kept.length());\n");
             code.push_str("                            }\n");
             code.push_str("                        }\n");
             code.push_str("                        break;\n");
@@ -1930,7 +2059,7 @@ fn generate_java_full(
 fn generate_python_full(
     dfa: &Dfa,
     spec: &LexerSpec,
-    trailing_dfas: &HashMap<usize, Dfa>,
+    trailing_dfas: &TrailingContextDfas,
 ) -> Result<String> {
     let mut code = String::new();
 
@@ -2057,44 +2186,74 @@ fn generate_python_full(
     // Trailing context (r1/r2): a small standalone DFA per rule that has it,
     // used to re-scan a match and find where r1 ends. Rules without trailing
     // context have no entry here.
-    code.push_str("# Trailing context ('r1/r2'): rule_index -> (transitions, accepting_states)\n");
-    code.push_str("TRAILING_CONTEXT = {\n");
-    for (rule_idx, tdfa) in trailing_dfas {
-        code.push_str(&format!("    {}: (\n        {{", rule_idx));
-        for state in &tdfa.states {
-            if !state.range_transitions.is_empty() {
-                code.push_str(&format!("{}: [", state.id));
-                for &(start_cp, end_cp, target) in &state.range_transitions {
-                    code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", start_cp, end_cp, target));
+    fn emit_python_tc_dict(code: &mut String, name: &str, dfas: &HashMap<usize, Dfa>) {
+        code.push_str(&format!("{}: dict = {{\n", name));
+        for (rule_idx, tdfa) in dfas {
+            code.push_str(&format!("    {}: (\n        {{", rule_idx));
+            for state in &tdfa.states {
+                if !state.range_transitions.is_empty() {
+                    code.push_str(&format!("{}: [", state.id));
+                    for &(start_cp, end_cp, target) in &state.range_transitions {
+                        code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", start_cp, end_cp, target));
+                    }
+                    code.push_str("], ");
+                } else if !state.transitions.is_empty() {
+                    code.push_str(&format!("{}: [", state.id));
+                    for (ch, target) in &state.transitions {
+                        let cp = *ch as u32;
+                        code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", cp, cp, target));
+                    }
+                    code.push_str("], ");
                 }
-                code.push_str("], ");
-            } else if !state.transitions.is_empty() {
-                code.push_str(&format!("{}: [", state.id));
-                for (ch, target) in &state.transitions {
-                    let cp = *ch as u32;
-                    code.push_str(&format!("(0x{:X}, 0x{:X}, {}), ", cp, cp, target));
+            }
+            code.push_str("},\n        {");
+            for state in &tdfa.states {
+                if state.is_accepting {
+                    code.push_str(&format!("{}, ", state.id));
                 }
-                code.push_str("], ");
             }
+            code.push_str("},\n    ),\n");
         }
-        code.push_str("},\n        {");
-        for state in &tdfa.states {
-            if state.is_accepting {
-                code.push_str(&format!("{}, ", state.id));
-            }
-        }
-        code.push_str("},\n    ),\n");
+        code.push_str("}\n\n");
     }
-    code.push_str("}\n\n");
+
+    code.push_str("# Trailing context ('r1/r2'): rule_index -> (transitions, accepting_states)\n");
+    emit_python_tc_dict(&mut code, "TRAILING_CONTEXT", &trailing_dfas.r1);
+    emit_python_tc_dict(&mut code, "TRAILING_CONTEXT_R2", &trailing_dfas.r2);
 
     if !trailing_dfas.is_empty() {
+        code.push_str("def _tc_r2_matches(rule_index: int, text: str) -> bool:\n");
+        code.push_str("    \"\"\"True if rule_index's r2 exactly matches all of `text`.\"\"\"\n");
+        code.push_str("    trans, accept = TRAILING_CONTEXT_R2[rule_index]\n");
+        code.push_str("    state = 0\n");
+        code.push_str("    for ch in text:\n");
+        code.push_str("        cp = ord(ch)\n");
+        code.push_str("        next_state = -1\n");
+        code.push_str("        for start_cp, end_cp, target in trans.get(state, []):\n");
+        code.push_str("            if start_cp <= cp <= end_cp:\n");
+        code.push_str("                next_state = target\n");
+        code.push_str("                break\n");
+        code.push_str("        if next_state == -1:\n");
+        code.push_str("            return False\n");
+        code.push_str("        state = next_state\n");
+        code.push_str("    return state in accept\n\n");
+
         code.push_str("def _trailing_context_split(rule_index: int, text: str) -> int:\n");
-        code.push_str("    \"\"\"Longest prefix of `text` that rule_index's r1 alone accepts.\"\"\"\n");
+        code.push_str(
+            "    \"\"\"Longest r1-accepted prefix of `text` whose remaining suffix is an\n",
+        );
+        code.push_str(
+            "    exact match for r2 (not just the longest r1 accepts on its own, which\n",
+        );
+        code.push_str(
+            "    picks the wrong boundary for e.g. a*/a). Falls back to the full match\n",
+        );
+        code.push_str("    (len(text)) if no candidate validates.\"\"\"\n");
         code.push_str("    trans, accept = TRAILING_CONTEXT[rule_index]\n");
         code.push_str("    state = 0\n");
-        code.push_str("    best = 0\n");
+        code.push_str("    candidates = []\n");
         code.push_str("    if state in accept:\n");
-        code.push_str("        best = 0\n");
+        code.push_str("        candidates.append(0)\n");
         code.push_str("    for i, ch in enumerate(text):\n");
         code.push_str("        cp = ord(ch)\n");
         code.push_str("        next_state = -1\n");
@@ -2106,8 +2265,13 @@ fn generate_python_full(
         code.push_str("            break\n");
         code.push_str("        state = next_state\n");
         code.push_str("        if state in accept:\n");
-        code.push_str("            best = i + 1\n");
-        code.push_str("    return best\n\n");
+        code.push_str("            candidates.append(i + 1)\n");
+        code.push_str("    # split == 0 is excluded even if r1/r2 both validate it: it would\n");
+        code.push_str("    # produce a zero-length token and never advance the input position.\n");
+        code.push_str("    for split in reversed(candidates):\n");
+        code.push_str("        if split > 0 and _tc_r2_matches(rule_index, text[split:]):\n");
+        code.push_str("            return split\n");
+        code.push_str("    return len(text)\n\n");
     }
 
     // Lexer class
@@ -2154,8 +2318,6 @@ fn generate_python_full(
     code.push_str(
         "                    split_len = _trailing_context_split(last_accepting_rule, matched)\n",
     );
-    code.push_str("                    if split_len == 0:  # r1 boundary not found in a decidable way\n");
-    code.push_str("                        split_len = len(matched)  # ponytail: dangerous trailing context, see r1/r2 docs\n");
     code.push_str("                    last_accepting_pos = start + split_len\n");
     code.push_str("                    kept = self.input[start:last_accepting_pos]\n");
     code.push_str("                    newlines = kept.count('\\n')\n");
