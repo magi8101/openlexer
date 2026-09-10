@@ -46,6 +46,7 @@ fn augment_grammar(grammar: &Grammar) -> Grammar {
         rhs: vec![Symbol::NonTerminal(grammar.start_symbol.clone())],
         action: None,
         precedence_sym: None,
+        line: 0, // synthetic rule, no real source location
     };
 
     // Build new rules list with augmented rule first

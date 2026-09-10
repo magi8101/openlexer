@@ -85,6 +85,11 @@ pub struct Rule {
     pub rhs: Vec<Symbol>,
     pub action: Option<String>,
     pub precedence_sym: Option<String>,
+    /// Source line this production starts on (1-based), for error messages.
+    /// 0 for synthetic rules with no real source location (e.g. the
+    /// augmented start rule, or rules built directly in Rust rather than
+    /// parsed from a grammar file).
+    pub line: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -241,7 +246,7 @@ impl<'a> GrammarParser<'a> {
                 if let Symbol::NonTerminal(name) = sym {
                     if name != "error" && !defined_nonterminals.contains(name.as_str()) {
                         return Err(Error::GrammarError {
-                            line: self.line,
+                            line: rule.line,
                             message: format!(
                                 "symbol '{}' is used in rule '{}' but is not declared as a %token and has no rules of its own - missing a %token declaration?",
                                 name, rule.lhs
@@ -277,7 +282,7 @@ impl<'a> GrammarParser<'a> {
             // Skip whitespace
             while let Some(c) = self.input[self.pos..].chars().next() {
                 if c.is_whitespace() {
-                    self.pos += c.len_utf8();
+                    self.advance(); // tracks '\n' for accurate line numbers
                 } else {
                     break;
                 }
@@ -707,6 +712,9 @@ impl<'a> GrammarParser<'a> {
 
             // Parse alternatives
             loop {
+                self.skip_whitespace_and_comments();
+                let alt_line = self.line;
+
                 // Use the new signature to capture rhs, action, and precedence
                 let (rhs, action, prec) = self.parse_rhs()?;
 
@@ -721,6 +729,7 @@ impl<'a> GrammarParser<'a> {
                     rhs,
                     action,
                     precedence_sym: prec,
+                    line: alt_line,
                 });
 
                 self.skip_whitespace_and_comments();
@@ -776,6 +785,7 @@ impl<'a> GrammarParser<'a> {
                         rhs: vec![], // Empty RHS (epsilon production)
                         action: Some(action),
                         precedence_sym: None,
+                        line: self.line,
                     });
 
                     // Add synthetic nonterminal to the current RHS
@@ -926,7 +936,7 @@ impl<'a> GrammarParser<'a> {
     fn skip_whitespace(&mut self) {
         while let Some(c) = self.input[self.pos..].chars().next() {
             if c.is_whitespace() {
-                self.pos += c.len_utf8();
+                self.advance(); // tracks '\n' for accurate line numbers
             } else {
                 break;
             }
@@ -1296,6 +1306,13 @@ impl<'a> GrammarParser<'a> {
                 rhs,
                 action: None,
                 precedence_sym: None,
+                // Textbook notation classifies every non-LHS symbol as a
+                // Terminal (auto-declaring it), so it can never produce the
+                // "NonTerminal with no rules" case the validation below
+                // checks for - no real per-rule line to track here anyway,
+                // since this path parses the whole input as one blob rather
+                // than tracking a line cursor.
+                line: 0,
             });
         }
 
@@ -1621,6 +1638,48 @@ expr:
 "#;
         let err = Grammar::parse(input).unwrap_err().to_string();
         assert!(err.contains("LPAREN"), "error should name the symbol: {}", err);
+    }
+
+    #[test]
+    fn test_undeclared_token_error_reports_correct_line() {
+        // Regression test: the reported line used to always be self.line -
+        // wherever the parser's cursor happened to land when the post-parse
+        // validation ran (effectively end of file), not where the offending
+        // symbol actually appears. A valid rule comes first here so a
+        // stuck-at-a-fixed-value line number wouldn't accidentally match by
+        // coincidence.
+        let input = "\
+%token NUMBER PLUS
+
+%%
+
+expr:
+    NUMBER
+  ;
+
+stmt:
+    UNDECLARED_SYM
+  ;
+
+%%
+";
+        let expected_line = input
+            .lines()
+            .position(|l| l.contains("UNDECLARED_SYM"))
+            .expect("test input must contain UNDECLARED_SYM")
+            + 1; // lines() is 0-indexed, source lines are 1-indexed
+
+        match Grammar::parse(input) {
+            Err(Error::GrammarError { line, message }) => {
+                assert!(message.contains("UNDECLARED_SYM"));
+                assert_eq!(
+                    line, expected_line,
+                    "expected the error to point at line {} (where UNDECLARED_SYM appears), got {}",
+                    expected_line, line
+                );
+            }
+            other => panic!("expected Err(Error::GrammarError {{ .. }}), got {:?}", other),
+        }
     }
 
     #[test]
