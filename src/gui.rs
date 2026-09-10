@@ -1609,7 +1609,7 @@ impl OpenLexerApp {
                 ui.add_space(4.0);
 
                 ui.code(
-                    r#"%token NUMBER IDENTIFIER PLUS MINUS
+                    r#"%token NUMBER IDENTIFIER PLUS MINUS LPAREN RPAREN
 
 %left PLUS MINUS
 %left TIMES DIVIDE
@@ -1681,7 +1681,7 @@ test("3 + 4 * 5");
 // Or manual usage
 Lexer l = new Lexer("10 / 2");
 Token t;
-while ((t = l.next()).type != TokenType.EOF) {
+while ((t = l.nextToken()).type != TokenType.TOKEN_EOF) {
     System.out.println(t.type);
 }"#
                 );
@@ -1694,12 +1694,12 @@ while ((t = l.next()).type != TokenType.EOF) {
                 ui.add_space(4.0);
                 ui.label("Unicode character classes supported:");
                 ui.code(
-                    r#"\\p{Letter}     - Any Unicode letter
-\\p{Nd}         - Decimal digit
-\\p{Lu}         - Uppercase letter
-\\p{Greek}      - Greek script
-\\p{Emoji}      - Emoji characters
-\\u{XXXX}       - Hex code point"#,
+                    r#"\p{Letter}     - Any Unicode letter
+\p{Nd}         - Decimal digit
+\p{Lu}         - Uppercase letter
+\p{Greek}      - Greek script
+\p{Punctuation} - Punctuation characters
+\u{XXXX}       - Hex code point"#,
                 );
             });
 
