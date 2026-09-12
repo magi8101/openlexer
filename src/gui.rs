@@ -21,6 +21,7 @@ use openlexer_lib::parsegen::grammar::Grammar;
 use openlexer_lib::parsegen::lalr::ParsingTable;
 use openlexer_lib::parsegen::codegen as parser_codegen;
 use openlexer_lib::debug::{LexerDebugger, ParserDebugger, LexerDebugStep, ParserDebugStep};
+use openlexer_lib::selfcontained::{self, GuessSource, TokenGuess};
 
 // Version info
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -110,6 +111,7 @@ enum MainTab {
     Lexer,
     Parser,
     Try,
+    SelfContained,
     Help,
 }
 
@@ -119,6 +121,7 @@ impl MainTab {
             MainTab::Lexer => "Lexer",
             MainTab::Parser => "Parser",
             MainTab::Try => "Try",
+            MainTab::SelfContained => "Self-Contained (Experimental)",
             MainTab::Help => "Help",
         }
     }
@@ -128,9 +131,26 @@ impl MainTab {
             MainTab::Lexer => "L",
             MainTab::Parser => "P",
             MainTab::Try => "T",
+            MainTab::SelfContained => "X",
             MainTab::Help => "?",
         }
     }
+}
+
+#[derive(Default, PartialEq, Clone, Copy)]
+enum SelfContainedSubTab {
+    #[default]
+    TokenAnalysis,
+    GeneratedCode,
+    Simulate,
+}
+
+#[derive(Default, PartialEq, Clone, Copy)]
+enum SelfContainedCodeView {
+    #[default]
+    LexerSpecText,
+    LexerCode,
+    ParserCode,
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -309,6 +329,21 @@ struct OpenLexerApp {
     try_code: String,
     try_include: TryInclude,
 
+    // Self-Contained (Experimental) tab: guess a lexer from a grammar's
+    // %token declarations, with no separate .l file.
+    selfcontained_sub_tab: SelfContainedSubTab,
+    selfcontained_code_view: SelfContainedCodeView,
+    selfcontained_grammar_input: String,
+    selfcontained_guesses: Vec<TokenGuess>,
+    selfcontained_lexer_text: String,
+    selfcontained_lexer_output: String,
+    selfcontained_parser_output: String,
+    selfcontained_spec: Option<LexerSpec>,
+    selfcontained_dfa: Option<Dfa>,
+    selfcontained_debugger: Option<LexerDebugger>,
+    selfcontained_debug_input: String,
+    selfcontained_debug_steps: Vec<LexerDebugStep>,
+
     // Cached build artifacts for visualization
     cached_nfa: Option<Nfa>,
     cached_dfa: Option<Dfa>,
@@ -433,6 +468,18 @@ impl OpenLexerApp {
             parser_options: ParserOptions::default(),
             try_code: String::new(),
             try_include: TryInclude::LexerOnly,
+            selfcontained_sub_tab: SelfContainedSubTab::default(),
+            selfcontained_code_view: SelfContainedCodeView::default(),
+            selfcontained_grammar_input: String::new(),
+            selfcontained_guesses: Vec::new(),
+            selfcontained_lexer_text: String::new(),
+            selfcontained_lexer_output: String::new(),
+            selfcontained_parser_output: String::new(),
+            selfcontained_spec: None,
+            selfcontained_dfa: None,
+            selfcontained_debugger: None,
+            selfcontained_debug_input: String::new(),
+            selfcontained_debug_steps: Vec::new(),
             cached_nfa: None,
             cached_dfa: None,
             cached_spec: None,
@@ -654,6 +701,109 @@ impl OpenLexerApp {
         }
     }
 
+    /// EXPERIMENTAL: parses the grammar and guesses a lexer rule for every
+    /// declared token, without needing a matching .l file at all.
+    fn analyze_selfcontained_tokens(&mut self) {
+        self.error = None;
+        match parsegen::parse_grammar(&self.selfcontained_grammar_input) {
+            Ok(grammar) => {
+                self.selfcontained_guesses = selfcontained::infer_token_guesses(&grammar);
+                self.status = format!(
+                    "Guessed lexer rules for {} tokens - review before generating",
+                    self.selfcontained_guesses.len()
+                );
+                self.log(LogLevel::Success, &self.status.clone());
+            }
+            Err(e) => {
+                self.selfcontained_guesses.clear();
+                self.error = Some(format!("Grammar parse error: {}", e));
+                self.log(LogLevel::Error, &format!("Grammar parse error: {}", e));
+            }
+        }
+    }
+
+    /// EXPERIMENTAL: assembles the (possibly user-edited) guesses into a
+    /// lexer spec, then runs the normal lexer and parser codegen pipelines
+    /// against it - a "self-contained" .y-to-working-code path with no
+    /// separate .l file, at the cost of guessed-not-written lexer rules.
+    fn generate_selfcontained(&mut self) {
+        self.error = None;
+        if self.selfcontained_guesses.is_empty() {
+            self.analyze_selfcontained_tokens();
+            if self.selfcontained_guesses.is_empty() {
+                return;
+            }
+        }
+
+        let lexer_text = selfcontained::build_lexer_spec_text(&self.selfcontained_guesses);
+        self.selfcontained_lexer_text = lexer_text.clone();
+
+        let spec = match lexgen::parse_lexer_spec(&lexer_text) {
+            Ok(s) => s,
+            Err(e) => {
+                self.error = Some(format!("Auto-generated lexer failed to parse: {}", e));
+                self.log(LogLevel::Error, &self.error.clone().unwrap());
+                return;
+            }
+        };
+
+        self.selfcontained_debugger = None;
+        self.selfcontained_debug_steps.clear();
+
+        match Nfa::from_lexer_spec_for_condition(&spec, "INITIAL", true) {
+            Ok(nfa) => match Dfa::from_nfa(&nfa) {
+                Ok(dfa) => self.selfcontained_dfa = Some(dfa),
+                Err(e) => self.log(LogLevel::Warning, &format!("DFA build failed: {}", e)),
+            },
+            Err(e) => self.log(LogLevel::Warning, &format!("NFA build failed: {}", e)),
+        }
+        self.selfcontained_spec = Some(spec.clone());
+
+        match lexgen::generate_code(&spec, self.language.as_str()) {
+            Ok(code) => self.selfcontained_lexer_output = code,
+            Err(e) => {
+                self.error = Some(format!("Lexer codegen error: {}", e));
+                self.log(LogLevel::Error, &self.error.clone().unwrap());
+                return;
+            }
+        }
+
+        let grammar = match parsegen::parse_grammar(&self.selfcontained_grammar_input) {
+            Ok(g) => g,
+            Err(e) => {
+                self.error = Some(format!("Grammar parse error: {}", e));
+                self.log(LogLevel::Error, &self.error.clone().unwrap());
+                return;
+            }
+        };
+        let target = match self.language.as_str().to_lowercase().as_str() {
+            "c" => openlexer_lib::lexgen::codegen::TargetLanguage::C,
+            "java" => openlexer_lib::lexgen::codegen::TargetLanguage::Java,
+            _ => openlexer_lib::lexgen::codegen::TargetLanguage::Python,
+        };
+        let table = match ParsingTable::build(&grammar) {
+            Ok(t) => t,
+            Err(e) => {
+                self.error = Some(format!("Parsing table build error: {}", e));
+                self.log(LogLevel::Error, &self.error.clone().unwrap());
+                return;
+            }
+        };
+        match parser_codegen::generate_parser(&table, &grammar, target) {
+            Ok(code) => {
+                self.selfcontained_parser_output = code;
+                self.status =
+                    "Generated self-contained lexer + parser (EXPERIMENTAL - review the guessed patterns)"
+                        .to_string();
+                self.log(LogLevel::Success, &self.status.clone());
+            }
+            Err(e) => {
+                self.error = Some(format!("Parser codegen error: {}", e));
+                self.log(LogLevel::Error, &self.error.clone().unwrap());
+            }
+        }
+    }
+
     fn run_try_code(&mut self) {
         if self.try_code.trim().is_empty() {
             self.log(LogLevel::Warning, "Write your test program first, then click Run.");
@@ -849,6 +999,7 @@ impl OpenLexerApp {
                 MainTab::Lexer,
                 MainTab::Parser,
                 MainTab::Try,
+                MainTab::SelfContained,
                 MainTab::Help,
             ] {
                 let selected = self.current_tab == tab;
@@ -1541,6 +1692,236 @@ impl OpenLexerApp {
         });
     }
 
+    fn render_selfcontained_grammar_editor(&mut self, ui: &mut egui::Ui) {
+        let available = ui.available_size();
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Grammar Specification (.y) - no .l file needed")
+                    .strong()
+                    .size(14.0),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Clear").clicked() {
+                    self.selfcontained_grammar_input.clear();
+                    self.selfcontained_guesses.clear();
+                }
+                if ui.button("Load Sample").clicked() {
+                    self.selfcontained_grammar_input = SAMPLE_PARSER.to_string();
+                    self.selfcontained_guesses.clear();
+                    self.log(LogLevel::Info, "Loaded sample grammar for self-contained mode");
+                }
+            });
+        });
+        ui.add_space(2.0);
+        let editor_height = (available.y - 40.0).max(100.0);
+        code_editor_with_lines(
+            ui,
+            "selfcontained_grammar_input",
+            &mut self.selfcontained_grammar_input,
+            available.x - 10.0,
+            editor_height,
+        );
+    }
+
+    fn render_selfcontained_run_panel(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new(
+                "EXPERIMENTAL: guesses a lexer from %token names alone. Every guess is a \
+                 starting point, not a substitute for writing a real .l file - review each \
+                 pattern in \"Token Analysis\" before trusting the generated code.",
+            )
+            .color(egui::Color32::from_rgb(230, 180, 80)),
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Analyze Tokens").clicked() {
+                self.analyze_selfcontained_tokens();
+            }
+            if ui.button("Generate Lexer + Parser").clicked() {
+                self.generate_selfcontained();
+            }
+            ui.label(&self.status);
+        });
+        if let Some(err) = self.error.clone() {
+            ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+        }
+    }
+
+    fn render_selfcontained_output(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.selfcontained_sub_tab,
+                SelfContainedSubTab::TokenAnalysis,
+                "Token Analysis",
+            );
+            ui.selectable_value(
+                &mut self.selfcontained_sub_tab,
+                SelfContainedSubTab::GeneratedCode,
+                "Generated Code",
+            );
+            ui.selectable_value(
+                &mut self.selfcontained_sub_tab,
+                SelfContainedSubTab::Simulate,
+                "Simulate",
+            );
+        });
+        ui.separator();
+        match self.selfcontained_sub_tab {
+            SelfContainedSubTab::TokenAnalysis => self.render_selfcontained_token_analysis(ui),
+            SelfContainedSubTab::GeneratedCode => self.render_selfcontained_generated_code(ui),
+            SelfContainedSubTab::Simulate => self.render_selfcontained_simulate(ui),
+        }
+    }
+
+    fn render_selfcontained_token_analysis(&mut self, ui: &mut egui::Ui) {
+        if self.selfcontained_guesses.is_empty() {
+            ui.label("No tokens analyzed yet - click \"Analyze Tokens\" below.");
+            return;
+        }
+        ui.label(egui::RichText::new("Guessed Lexer Rules").strong().size(15.0));
+        ui.label("Edit any pattern that looks wrong before generating - these are guesses.");
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::Grid::new("selfcontained_guess_grid")
+                .num_columns(3)
+                .striped(true)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.strong("Token");
+                    ui.strong("Pattern (.l syntax)");
+                    ui.strong("Source");
+                    ui.end_row();
+                    for guess in &mut self.selfcontained_guesses {
+                        ui.label(&guess.name);
+                        ui.text_edit_singleline(&mut guess.pattern);
+                        let (label, color) = match guess.source {
+                            GuessSource::Literal => {
+                                (guess.source.label(), egui::Color32::from_rgb(120, 220, 120))
+                            }
+                            GuessSource::KnownConvention => {
+                                (guess.source.label(), egui::Color32::from_rgb(120, 180, 255))
+                            }
+                            GuessSource::KeywordFallback => {
+                                (guess.source.label(), egui::Color32::from_rgb(230, 180, 80))
+                            }
+                        };
+                        ui.colored_label(color, label);
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    fn render_selfcontained_generated_code(&mut self, ui: &mut egui::Ui) {
+        if self.selfcontained_lexer_output.is_empty() && self.selfcontained_parser_output.is_empty()
+        {
+            ui.label("Nothing generated yet - click \"Generate Lexer + Parser\" below.");
+            return;
+        }
+        let available = ui.available_size();
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.selfcontained_code_view,
+                SelfContainedCodeView::LexerSpecText,
+                "Auto-generated .l",
+            );
+            ui.selectable_value(
+                &mut self.selfcontained_code_view,
+                SelfContainedCodeView::LexerCode,
+                format!("{} Lexer", self.language.display_name()),
+            );
+            ui.selectable_value(
+                &mut self.selfcontained_code_view,
+                SelfContainedCodeView::ParserCode,
+                format!("{} Parser", self.language.display_name()),
+            );
+        });
+        ui.add_space(4.0);
+        let viewer_height = (available.y - 40.0).max(100.0);
+        let text = match self.selfcontained_code_view {
+            SelfContainedCodeView::LexerSpecText => &self.selfcontained_lexer_text,
+            SelfContainedCodeView::LexerCode => &self.selfcontained_lexer_output,
+            SelfContainedCodeView::ParserCode => &self.selfcontained_parser_output,
+        };
+        code_viewer_with_lines(ui, "selfcontained_code_view", text, available.x - 10.0, viewer_height);
+    }
+
+    fn render_selfcontained_simulate(&mut self, ui: &mut egui::Ui) {
+        let dfa = match self.selfcontained_dfa.clone() {
+            Some(d) => d,
+            None => {
+                ui.label("No auto-generated lexer yet - click \"Generate Lexer + Parser\" below.");
+                return;
+            }
+        };
+        let spec = match self.selfcontained_spec.clone() {
+            Some(s) => s,
+            None => {
+                ui.label("No auto-generated lexer yet - click \"Generate Lexer + Parser\" below.");
+                return;
+            }
+        };
+
+        if self.selfcontained_debugger.is_none() {
+            self.selfcontained_debugger =
+                Some(LexerDebugger::new(dfa, spec, &self.selfcontained_debug_input));
+        }
+        let debugger = self.selfcontained_debugger.as_mut().unwrap();
+
+        ui.label(
+            "Step through the auto-generated lexer's DFA transitions on sample input to \
+             sanity-check the guessed patterns.",
+        );
+        ui.horizontal(|ui| {
+            ui.label("Input:");
+            if ui
+                .text_edit_singleline(&mut self.selfcontained_debug_input)
+                .changed()
+            {
+                debugger.reset_with_input(&self.selfcontained_debug_input);
+                self.selfcontained_debug_steps.clear();
+            }
+        });
+
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            if ui.button("Step Char").clicked() {
+                if let Some(step) = debugger.step() {
+                    self.selfcontained_debug_steps.push(step);
+                }
+            }
+            if ui.button("Step Token").clicked() {
+                let steps = debugger.step_token();
+                self.selfcontained_debug_steps.extend(steps);
+            }
+            if ui.button("Run All").clicked() {
+                let steps = debugger.run_all();
+                self.selfcontained_debug_steps.extend(steps);
+            }
+            if ui.button("Reset").clicked() {
+                debugger.reset();
+                self.selfcontained_debug_steps.clear();
+            }
+
+            ui.add_space(20.0);
+            if debugger.is_finished() {
+                ui.label(egui::RichText::new("Finished").color(egui::Color32::GREEN));
+            } else {
+                ui.label(format!(
+                    "Pos: {}, State: {}",
+                    debugger.current_position(),
+                    debugger.current_state_id()
+                ));
+            }
+        });
+
+        ui.separator();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            render_lexer_debug_steps_table(ui, &self.selfcontained_debug_steps);
+        });
+    }
+
     fn render_help_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.heading("OpenLexer Help");
@@ -1986,78 +2367,7 @@ while ((t = l.nextToken()).type != TokenType.TOKEN_EOF) {
         ui.separator();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            TableBuilder::new(ui)
-                .striped(true)
-                .column(Column::initial(40.0)) // Char
-                .column(Column::initial(80.0)) // From -> To
-                .column(Column::initial(100.0)) // Is Accepting
-                .column(Column::remainder()) // Token Info
-                .header(20.0, |mut header| {
-                    header.col(|ui| {
-                        ui.strong("Char");
-                    });
-                    header.col(|ui| {
-                        ui.strong("State");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Status");
-                    });
-                    header.col(|ui| {
-                        ui.strong("Token");
-                    });
-                })
-                .body(|mut body| {
-                    for step in &self.lexer_debug_steps {
-                        body.row(20.0, |mut row| {
-                            row.col(|ui| {
-                                ui.label(format!("'{}'", step.current_char.escape_debug()));
-                            });
-                            row.col(|ui| {
-                                if let Some(to) = step.to_state {
-                                    ui.label(format!("{} -> {}", step.from_state, to));
-                                } else {
-                                    ui.label(format!("{} -> (dead)", step.from_state));
-                                }
-                            });
-                            row.col(|ui| {
-                                if step.token_completed {
-                                    ui.label(
-                                        egui::RichText::new("TOKEN EMIT")
-                                            .color(egui::Color32::from_rgb(100, 200, 255))
-                                            .strong(),
-                                    );
-                                } else if step.is_accepting {
-                                    ui.label(
-                                        egui::RichText::new("Accepts").color(egui::Color32::GREEN),
-                                    );
-                                } else if step.to_state.is_none() {
-                                    ui.label(
-                                        egui::RichText::new("Dead State").color(egui::Color32::RED),
-                                    );
-                                } else {
-                                    ui.label("-");
-                                }
-                            });
-                            row.col(|ui| {
-                                if step.token_completed {
-                                    if let Some(name) = &step.token_name {
-                                        ui.label(format!(
-                                            "{} (\"{}\")",
-                                            name,
-                                            step.current_lexeme.escape_debug()
-                                        ));
-                                    } else {
-                                        ui.label("(token)"); // Fallback
-                                    }
-                                } else if step.is_accepting {
-                                    if let Some(rule) = step.rule_index {
-                                        ui.label(format!("Rule {}", rule));
-                                    }
-                                }
-                            });
-                        });
-                    }
-                });
+            render_lexer_debug_steps_table(ui, &self.lexer_debug_steps);
         });
     }
 
@@ -2629,12 +2939,36 @@ impl eframe::App for OpenLexerApp {
             egui::CentralPanel::default().show(ctx, |ui| {
                 self.render_try_editor(ui);
             });
+        } else if self.current_tab == MainTab::SelfContained {
+            // Self-Contained tab: same 3-panel layout as Lexer/Parser
+            egui::TopBottomPanel::bottom("selfcontained_run_panel")
+                .resizable(true)
+                .default_height(90.0)
+                .min_height(60.0)
+                .max_height(300.0)
+                .show(ctx, |ui| {
+                    self.render_selfcontained_run_panel(ui);
+                });
+
+            egui::SidePanel::left("selfcontained_grammar_panel")
+                .resizable(true)
+                .default_width(ctx.screen_rect().width() * 0.45)
+                .min_width(200.0)
+                .max_width(ctx.screen_rect().width() * 0.75)
+                .show(ctx, |ui| {
+                    self.render_selfcontained_grammar_editor(ui);
+                });
+
+            egui::CentralPanel::default().show(ctx, |ui| {
+                self.render_selfcontained_output(ui);
+            });
         } else {
             // Help tab
             egui::CentralPanel::default().show(ctx, |ui| match self.current_tab {
                 MainTab::Lexer => unreachable!(),
                 MainTab::Parser => unreachable!(),
                 MainTab::Try => unreachable!(),
+                MainTab::SelfContained => unreachable!(),
                 MainTab::Help => self.render_help_tab(ui),
             });
         }
@@ -2644,6 +2978,84 @@ impl eframe::App for OpenLexerApp {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Renders a lexer-DFA step-by-step trace as a table (Char / State / Status /
+/// Token). Shared by the Lexer tab's Debug panel and the Self-Contained
+/// tab's Simulate panel, since both drive a `LexerDebugger` the same way.
+fn render_lexer_debug_steps_table(ui: &mut egui::Ui, steps: &[LexerDebugStep]) {
+    TableBuilder::new(ui)
+        .striped(true)
+        .column(Column::initial(40.0)) // Char
+        .column(Column::initial(80.0)) // From -> To
+        .column(Column::initial(100.0)) // Is Accepting
+        .column(Column::remainder()) // Token Info
+        .header(20.0, |mut header| {
+            header.col(|ui| {
+                ui.strong("Char");
+            });
+            header.col(|ui| {
+                ui.strong("State");
+            });
+            header.col(|ui| {
+                ui.strong("Status");
+            });
+            header.col(|ui| {
+                ui.strong("Token");
+            });
+        })
+        .body(|mut body| {
+            for step in steps {
+                body.row(20.0, |mut row| {
+                    row.col(|ui| {
+                        ui.label(format!("'{}'", step.current_char.escape_debug()));
+                    });
+                    row.col(|ui| {
+                        if let Some(to) = step.to_state {
+                            ui.label(format!("{} -> {}", step.from_state, to));
+                        } else {
+                            ui.label(format!("{} -> (dead)", step.from_state));
+                        }
+                    });
+                    row.col(|ui| {
+                        if step.token_completed {
+                            ui.label(
+                                egui::RichText::new("TOKEN EMIT")
+                                    .color(egui::Color32::from_rgb(100, 200, 255))
+                                    .strong(),
+                            );
+                        } else if step.is_accepting {
+                            ui.label(
+                                egui::RichText::new("Accepts").color(egui::Color32::GREEN),
+                            );
+                        } else if step.to_state.is_none() {
+                            ui.label(
+                                egui::RichText::new("Dead State").color(egui::Color32::RED),
+                            );
+                        } else {
+                            ui.label("-");
+                        }
+                    });
+                    row.col(|ui| {
+                        if step.token_completed {
+                            if let Some(name) = &step.token_name {
+                                ui.label(format!(
+                                    "{} (\"{}\")",
+                                    name,
+                                    step.current_lexeme.escape_debug()
+                                ));
+                            } else {
+                                ui.label("(token)"); // Fallback
+                            }
+                        } else if step.is_accepting {
+                            if let Some(rule) = step.rule_index {
+                                ui.label(format!("Rule {}", rule));
+                            }
+                        }
+                    });
+                });
+            }
+        });
+}
 
 fn code_editor_with_lines(ui: &mut egui::Ui, id: &str, text: &mut String, _width: f32, _height: f32) {
     let line_count = text.lines().count().max(1);
