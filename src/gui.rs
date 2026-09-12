@@ -1579,6 +1579,11 @@ impl OpenLexerApp {
             ui.group(|ui| {
                 ui.label(egui::RichText::new("Lexer Syntax").strong().size(16.0));
                 ui.add_space(4.0);
+                ui.label(
+                    "Illustrates start conditions (%x/%s, BEGIN) - not a matching pair with \
+                     the Parser Syntax example below (see note under that example).",
+                );
+                ui.add_space(4.0);
 
                 ui.code(
                     r#"%{
@@ -1597,6 +1602,7 @@ impl OpenLexerApp {
 "//".*         { /* skip line comment */ }
 "/*"           { BEGIN(COMMENT); }
 <COMMENT>"*/"  { BEGIN(INITIAL); }
+[ \t\n]+       { /* skip whitespace */ }
 %%
 "#,
                 );
@@ -1609,7 +1615,7 @@ impl OpenLexerApp {
                 ui.add_space(4.0);
 
                 ui.code(
-                    r#"%token NUMBER IDENTIFIER PLUS MINUS LPAREN RPAREN
+                    r#"%token NUMBER IDENTIFIER PLUS MINUS TIMES DIVIDE LPAREN RPAREN
 
 %left PLUS MINUS
 %left TIMES DIVIDE
@@ -1618,14 +1624,32 @@ impl OpenLexerApp {
 %%
 
 expr:
-    expr PLUS expr   { $$ = $1 + $3; }
-  | expr MINUS expr  { $$ = $1 - $3; }
-  | LPAREN expr RPAREN { $$ = $2; }
-  | NUMBER           { $$ = $1; }
+    expr PLUS term    { $$ = $1 + $3; }
+  | expr MINUS term   { $$ = $1 - $3; }
+  | term              { $$ = $1; }
+  ;
+
+term:
+    term TIMES factor  { $$ = $1 * $3; }
+  | term DIVIDE factor { $$ = $1 / $3; }
+  | factor             { $$ = $1; }
+  ;
+
+factor:
+    LPAREN expr RPAREN         { $$ = $2; }
+  | MINUS factor %prec UMINUS  { $$ = -$2; }
+  | NUMBER                     { $$ = $1; }
   ;
 
 %%
 "#,
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    "This example is self-contained (every declared token is used in a rule), \
+                     but it doesn't share a lexer with the example above - for a complete, \
+                     matching lexer+grammar pair you can generate and run, use the \
+                     \"Load Sample\" buttons on the Lexer and Parser tabs.",
                 );
             });
 
