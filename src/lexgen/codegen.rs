@@ -769,7 +769,11 @@ fn generate_c_with_conditions(
     code.push_str("}\n\n");
 
     // Token name helper
-    code.push_str("const char* lexer_token_name(TokenType type) {\n");
+    // Takes a plain `int` (rather than TokenType) so parser.c's yylex()
+    // adapter can declare a matching extern prototype without needing this
+    // spec's TokenType enum - the C standard doesn't guarantee an enum
+    // parameter type is compatible with a differently-declared caller.
+    code.push_str("const char* lexer_token_name(int type) {\n");
     code.push_str("    switch (type) {\n");
     code.push_str("        case TOKEN_EOF: return \"EOF\";\n");
     code.push_str("        case TOKEN_ERROR: return \"ERROR\";\n");
@@ -777,7 +781,12 @@ fn generate_c_with_conditions(
     displayed_tokens.insert("EOF".to_string());
     displayed_tokens.insert("ERROR".to_string());
     for rule in &spec.rules {
-        if let RuleAction::Token(name) = &rule.action {
+        let name = match &rule.action {
+            RuleAction::Token(name) => Some(name),
+            RuleAction::TokenAndBegin(name, _) => Some(name),
+            _ => None,
+        };
+        if let Some(name) = name {
             let upper = name.to_uppercase();
             if displayed_tokens.insert(upper.clone()) {
                 code.push_str(&format!("        case TOKEN_{}: return \"{}\";\n", upper, upper));
@@ -1435,7 +1444,11 @@ fn generate_c_full(
     code.push_str("}\n\n");
 
     // Token name helper
-    code.push_str("const char* lexer_token_name(TokenType type) {\n");
+    // Takes a plain `int` (rather than TokenType) so parser.c's yylex()
+    // adapter can declare a matching extern prototype without needing this
+    // spec's TokenType enum - the C standard doesn't guarantee an enum
+    // parameter type is compatible with a differently-declared caller.
+    code.push_str("const char* lexer_token_name(int type) {\n");
     code.push_str("    switch (type) {\n");
     code.push_str("        case TOKEN_EOF: return \"EOF\";\n");
     code.push_str("        case TOKEN_ERROR: return \"ERROR\";\n");
@@ -1443,7 +1456,12 @@ fn generate_c_full(
     displayed_tokens.insert("EOF".to_string());
     displayed_tokens.insert("ERROR".to_string());
     for rule in &spec.rules {
-        if let RuleAction::Token(name) = &rule.action {
+        let name = match &rule.action {
+            RuleAction::Token(name) => Some(name),
+            RuleAction::TokenAndBegin(name, _) => Some(name),
+            _ => None,
+        };
+        if let Some(name) = name {
             let upper = name.to_uppercase();
             if displayed_tokens.insert(upper.clone()) {
                 code.push_str(&format!("        case TOKEN_{}: return \"{}\";\n", upper, upper));

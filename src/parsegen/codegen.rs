@@ -596,6 +596,7 @@ fn generate_c_parser_test_driver() -> String {
         " * ============================================================================= */\n\n",
     );
     code.push_str("#ifndef PARSER_NO_MAIN\n");
+    code.push_str("#ifndef PARSER_NO_YYLEX_ADAPTER\n");
     code.push_str("/* Reads argv[1] if given, otherwise all of stdin, into a malloc'd buffer. */\n");
     code.push_str("static char* yylex_read_input(int argc, char **argv) {\n");
     code.push_str("    FILE* f = (argc > 1) ? fopen(argv[1], \"rb\") : stdin;\n");
@@ -610,15 +611,20 @@ fn generate_c_parser_test_driver() -> String {
     code.push_str("    buf[len] = '\\0';\n");
     code.push_str("    if (f != stdin) fclose(f);\n");
     code.push_str("    return buf;\n");
-    code.push_str("}\n\n");
+    code.push_str("}\n");
+    code.push_str("#endif /* PARSER_NO_YYLEX_ADAPTER */\n\n");
     code.push_str("int main(int argc, char **argv) {\n");
     code.push_str("    printf(\"=== OpenLexer Parser Test ===\\n\");\n");
-    code.push_str("    char* input = yylex_read_input(argc, argv);\n");
     code.push_str("#ifndef PARSER_NO_YYLEX_ADAPTER\n");
+    code.push_str("    char* input = yylex_read_input(argc, argv);\n");
     code.push_str("    yylex_set_input(input);\n");
+    code.push_str("#else\n");
+    code.push_str("    (void)argc; (void)argv; /* custom yylex() owns its own input source */\n");
     code.push_str("#endif\n");
     code.push_str("    int result = yyparse();\n");
+    code.push_str("#ifndef PARSER_NO_YYLEX_ADAPTER\n");
     code.push_str("    free(input);\n");
+    code.push_str("#endif\n");
     code.push_str("    if (result == 0) {\n");
     code.push_str("        printf(\"Parse successful!\\n\");\n");
     code.push_str("    } else {\n");
