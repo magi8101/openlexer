@@ -60,7 +60,8 @@ fn known_convention_pattern(name: &str) -> Option<&'static str> {
 }
 
 /// Quote a literal value for use as a `.l` pattern, e.g. `+` -> `"+"`.
-/// Doubles any embedded `"` so the quoted text stays well-formed; good
+/// Backslash-escapes any embedded `"` (matching how the lexer spec parser
+/// itself reads quoted patterns) so the quoted text stays well-formed; good
 /// enough for the operator/punctuation/keyword literals this is meant for.
 fn quote_literal(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))

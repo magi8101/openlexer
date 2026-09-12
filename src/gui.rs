@@ -335,6 +335,10 @@ struct OpenLexerApp {
     selfcontained_code_view: SelfContainedCodeView,
     selfcontained_grammar_input: String,
     selfcontained_guesses: Vec<TokenGuess>,
+    /// The grammar text `selfcontained_guesses` was computed from, so a
+    /// grammar edit without re-analyzing doesn't silently generate from
+    /// stale guesses for a different grammar.
+    selfcontained_guesses_source: String,
     selfcontained_lexer_text: String,
     selfcontained_lexer_output: String,
     selfcontained_parser_output: String,
@@ -472,6 +476,7 @@ impl OpenLexerApp {
             selfcontained_code_view: SelfContainedCodeView::default(),
             selfcontained_grammar_input: String::new(),
             selfcontained_guesses: Vec::new(),
+            selfcontained_guesses_source: String::new(),
             selfcontained_lexer_text: String::new(),
             selfcontained_lexer_output: String::new(),
             selfcontained_parser_output: String::new(),
@@ -708,6 +713,7 @@ impl OpenLexerApp {
         match parsegen::parse_grammar(&self.selfcontained_grammar_input) {
             Ok(grammar) => {
                 self.selfcontained_guesses = selfcontained::infer_token_guesses(&grammar);
+                self.selfcontained_guesses_source = self.selfcontained_grammar_input.clone();
                 self.status = format!(
                     "Guessed lexer rules for {} tokens - review before generating",
                     self.selfcontained_guesses.len()
@@ -716,6 +722,7 @@ impl OpenLexerApp {
             }
             Err(e) => {
                 self.selfcontained_guesses.clear();
+                self.selfcontained_guesses_source.clear();
                 self.error = Some(format!("Grammar parse error: {}", e));
                 self.log(LogLevel::Error, &format!("Grammar parse error: {}", e));
             }
@@ -728,7 +735,20 @@ impl OpenLexerApp {
     /// separate .l file, at the cost of guessed-not-written lexer rules.
     fn generate_selfcontained(&mut self) {
         self.error = None;
-        if self.selfcontained_guesses.is_empty() {
+        self.selfcontained_lexer_text.clear();
+        self.selfcontained_lexer_output.clear();
+        self.selfcontained_parser_output.clear();
+        self.selfcontained_dfa = None;
+        self.selfcontained_spec = None;
+        self.selfcontained_debugger = None;
+        self.selfcontained_debug_steps.clear();
+
+        // Re-analyze if the grammar changed since the last analysis, so a
+        // grammar edit followed by Generate (without re-clicking Analyze)
+        // never silently uses guesses computed for a different grammar.
+        if self.selfcontained_guesses.is_empty()
+            || self.selfcontained_guesses_source != self.selfcontained_grammar_input
+        {
             self.analyze_selfcontained_tokens();
             if self.selfcontained_guesses.is_empty() {
                 return;
@@ -746,9 +766,6 @@ impl OpenLexerApp {
                 return;
             }
         };
-
-        self.selfcontained_debugger = None;
-        self.selfcontained_debug_steps.clear();
 
         match Nfa::from_lexer_spec_for_condition(&spec, "INITIAL", true) {
             Ok(nfa) => match Dfa::from_nfa(&nfa) {
@@ -1870,6 +1887,14 @@ impl OpenLexerApp {
         ui.label(
             "Step through the auto-generated lexer's DFA transitions on sample input to \
              sanity-check the guessed patterns.",
+        );
+        ui.label(
+            egui::RichText::new(
+                "This traces the lexer from the last \"Generate Lexer + Parser\" run - edits \
+                 to patterns in Token Analysis won't show up here until you generate again.",
+            )
+            .small()
+            .color(egui::Color32::GRAY),
         );
         ui.horizontal(|ui| {
             ui.label("Input:");
