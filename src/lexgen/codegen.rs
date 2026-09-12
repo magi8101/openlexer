@@ -592,6 +592,18 @@ fn generate_c_with_conditions(
     code.push_str("    yylex_lexer = lexer;\n");
     code.push_str("}\n\n");
 
+    // Heap-allocating constructor/destructor: lets other translation units
+    // (e.g. a generated parser's yylex() adapter) create and drive a Lexer
+    // through an opaque `Lexer*` without knowing this struct's field layout.
+    code.push_str("Lexer* lexer_create(const char* input) {\n");
+    code.push_str("    Lexer* lexer = (Lexer*)malloc(sizeof(Lexer));\n");
+    code.push_str("    if (lexer) lexer_init(lexer, input);\n");
+    code.push_str("    return lexer;\n");
+    code.push_str("}\n\n");
+    code.push_str("void lexer_destroy(Lexer* lexer) {\n");
+    code.push_str("    free(lexer);\n");
+    code.push_str("}\n\n");
+
     // Begin function
     code.push_str("void lexer_begin(Lexer* lexer, StartCondition condition) {\n");
     code.push_str("    lexer->condition = condition;\n");
@@ -757,7 +769,7 @@ fn generate_c_with_conditions(
     code.push_str("}\n\n");
 
     // Token name helper
-    code.push_str("static const char* token_name(TokenType type) {\n");
+    code.push_str("const char* lexer_token_name(TokenType type) {\n");
     code.push_str("    switch (type) {\n");
     code.push_str("        case TOKEN_EOF: return \"EOF\";\n");
     code.push_str("        case TOKEN_ERROR: return \"ERROR\";\n");
@@ -927,6 +939,17 @@ fn generate_c_with_conditions(
     code.push_str("    token.line = lexer->line;\n");
     code.push_str("    token.column = lexer->column;\n");
     code.push_str("    return token;\n");
+    code.push_str("}\n\n");
+
+    // Output-param variant of lexer_next(): avoids handing the Token struct
+    // itself across a translation-unit boundary (e.g. to a parser's yylex()
+    // adapter), since Token's exact layout can differ between this codegen
+    // path and generate_c_full's.
+    code.push_str("int lexer_next_token(Lexer* lexer, const char** out_text, int* out_len) {\n");
+    code.push_str("    Token tok = lexer_next(lexer);\n");
+    code.push_str("    *out_text = tok.start;\n");
+    code.push_str("    *out_len = tok.length;\n");
+    code.push_str("    return (int)tok.type;\n");
     code.push_str("}\n");
 
     // Built-in test driver
@@ -1359,6 +1382,18 @@ fn generate_c_full(
     code.push_str("    lexer->current = input;\n");
     code.push_str("}\n\n");
 
+    // Heap-allocating constructor/destructor: lets other translation units
+    // (e.g. a generated parser's yylex() adapter) create and drive a Lexer
+    // through an opaque `Lexer*` without knowing this struct's field layout.
+    code.push_str("Lexer* lexer_create(const char* input) {\n");
+    code.push_str("    Lexer* lexer = (Lexer*)malloc(sizeof(Lexer));\n");
+    code.push_str("    if (lexer) lexer_init(lexer, input);\n");
+    code.push_str("    return lexer;\n");
+    code.push_str("}\n\n");
+    code.push_str("void lexer_destroy(Lexer* lexer) {\n");
+    code.push_str("    free(lexer);\n");
+    code.push_str("}\n\n");
+
     // Generate rule index to token mapping
     code.push_str("static TokenType rule_to_token(int rule_index) {\n");
     code.push_str("    switch (rule_index) {\n");
@@ -1400,7 +1435,7 @@ fn generate_c_full(
     code.push_str("}\n\n");
 
     // Token name helper
-    code.push_str("static const char* token_name(TokenType type) {\n");
+    code.push_str("const char* lexer_token_name(TokenType type) {\n");
     code.push_str("    switch (type) {\n");
     code.push_str("        case TOKEN_EOF: return \"EOF\";\n");
     code.push_str("        case TOKEN_ERROR: return \"ERROR\";\n");
@@ -1677,6 +1712,17 @@ fn generate_c_full(
 
     code.push_str("    token.type = TOKEN_EOF;\n");
     code.push_str("    return token;\n");
+    code.push_str("}\n\n");
+
+    // Output-param variant of lexer_next(): avoids handing the Token struct
+    // itself across a translation-unit boundary (e.g. to a parser's yylex()
+    // adapter), since Token's exact layout can differ between this codegen
+    // path and generate_c_with_conditions's.
+    code.push_str("int lexer_next_token(Lexer* lexer, const char** out_text, int* out_len) {\n");
+    code.push_str("    Token tok = lexer_next(lexer);\n");
+    code.push_str("    *out_text = tok.start;\n");
+    code.push_str("    *out_len = tok.length;\n");
+    code.push_str("    return (int)tok.type;\n");
     code.push_str("}\n");
 
     // Built-in test driver
@@ -2570,7 +2616,7 @@ pub fn generate_c_test_driver() -> String {
     code.push_str("    Token token;\n");
     code.push_str("    do {\n");
     code.push_str("        token = lexer_next(&lexer);\n");
-    code.push_str("        printf(\"  %-12s | \\\"\", token_name(token.type));\n");
+    code.push_str("        printf(\"  %-12s | \\\"\", lexer_token_name(token.type));\n");
     code.push_str("        for (int i = 0; i < token.length; i++) putchar(token.start[i]);\n");
     code.push_str("        printf(\"\\\"\\n\");\n");
     code.push_str("    } while (token.type != TOKEN_EOF);\n");
